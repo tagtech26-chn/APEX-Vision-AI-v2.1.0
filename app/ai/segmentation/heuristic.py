@@ -1,4 +1,4 @@
-"""Lightweight heuristic floor segmenter (no external models)."""
+"""Lightweight heuristic floor/object segmentation (no external models)."""
 
 from __future__ import annotations
 
@@ -39,8 +39,6 @@ def estimate_floor_mask(image: np.ndarray) -> np.ndarray:
 
     mask = _carve_high_texture(mask, image)
 
-    # One larger opening trims thin colour-bridged bands above the true floor
-    # horizon (they connect to the floor but do not belong to it).
     fine = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, fine, iterations=1)
 
@@ -57,13 +55,8 @@ def _carve_high_texture(mask: np.ndarray, image: np.ndarray) -> np.ndarray:
     mean = cv2.boxFilter(gray, -1, (15, 15))
     local_std = np.sqrt(np.maximum(gray2 - mean * mean, 0.0))
 
-    # Smooth floors stay well below the rug's texture; a textured floor raises
-    # the threshold via its own median so it is never stripped.
     floor_median = float(np.median(local_std[mask > 0]))
     carve_threshold = max(14.0, floor_median * 5.0)
-
-    # Only carve interior pixels: the mask boundary has a high local std band
-    # (wall/floor edge) that must be kept so the floor isn't stripped.
     interior = cv2.erode(mask, np.ones((15, 15), np.uint8))
 
     carved = mask.copy()
@@ -89,8 +82,80 @@ def _largest_component(mask: np.ndarray) -> np.ndarray:
     return result
 
 
+def estimate_obstruction_mask(
+    image: np.ndarray,
+    box: tuple[int, int, int, int],
+) -> np.ndarray:
+    """Segment a detected foreground box without a learned model.
+
+    The mask starts from colour/texture separation inside the detector box and
+    is then dilated slightly so antialiased edges cannot leak tile pixels.
+    """
+    h, w = image.shape[:2]
+    x1, y1, x2, y2 = [int(v) for v in box]
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(w, x2), min(h, y2)
+    result = np.zeros((h, w), dtype=np.uint8)
+    if x2 <= x1 or y2 <= y1:
+        return result
+
+    crop = image[y1:y2, x1:x2]
+    lab = cv2.cvtColor(crop, cv2.COLOR_BGR2LAB).astype(np.float32)
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY).astype(np.float32)
+
+    # Border pixels are more likely to be floor/background. Use their robust
+    # statistics as the local background reference.
+    bh, bw = crop.shape[:2]
+    border = np.concatenate(
+        [
+            lab[: max(2, bh // 10), :, :].reshape(-1, 3),
+            lab[-max(2, bh // 10) :, :, :].reshape(-1, 3),
+            lab[:, : max(2, bw // 10), :].reshape(-1, 3),
+            lab[:, -max(2, bw // 10) :, :].reshape(-1, 3),
+        ],
+        axis=0,
+    )
+    reference = np.median(border, axis=0)
+    colour_distance = np.linalg.norm(lab - reference, axis=2)
+
+    mean = cv2.boxFilter(gray, -1, (11, 11))
+    mean2 = cv2.boxFilter(gray * gray, -1, (11, 11))
+    local_std = np.sqrt(np.maximum(mean2 - mean * mean, 0.0))
+
+    colour_threshold = max(12.0, float(np.percentile(colour_distance, 65)))
+    texture_threshold = max(10.0, float(np.percentile(local_std, 72)))
+    candidate = (colour_distance > colour_threshold) | (
+        local_std > texture_threshold
+    )
+
+    candidate = (candidate.astype(np.uint8) * 255)
+    candidate = cv2.morphologyEx(
+        candidate, cv2.MORPH_CLOSE, np.ones((11, 11), np.uint8), iterations=2
+    )
+    candidate = cv2.morphologyEx(
+        candidate, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8), iterations=1
+    )
+
+    # Keep the dominant connected foreground region, but fall back to the box
+    # when the image is nearly uniform and there is no reliable separation.
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(candidate, 8)
+    if count > 1:
+        areas = stats[1:, cv2.CC_STAT_AREA]
+        idx = 1 + int(np.argmax(areas))
+        if int(areas.max()) >= max(100, int(crop.shape[0] * crop.shape[1] * 0.04)):
+            candidate = np.where(labels == idx, 255, 0).astype(np.uint8)
+        else:
+            candidate = np.full(candidate.shape, 255, dtype=np.uint8)
+    else:
+        candidate = np.full(candidate.shape, 255, dtype=np.uint8)
+
+    candidate = cv2.dilate(candidate, np.ones((5, 5), np.uint8), iterations=1)
+    result[y1:y2, x1:x2] = candidate
+    return result
+
+
 class HeuristicSegmenter(SamplerSegmenterMixin, Segmenter):
-    """Produces a floor mask via adaptive LAB colour + texture heuristics."""
+    """Produces floor and conservative foreground masks via image statistics."""
 
     name = "heuristic"
 
@@ -101,3 +166,14 @@ class HeuristicSegmenter(SamplerSegmenterMixin, Segmenter):
         points: np.ndarray | None = None,
     ) -> np.ndarray:
         return estimate_floor_mask(image)
+
+    def segment_many(
+        self,
+        image: np.ndarray,
+        boxes: list[tuple[int, int, int, int]] | None = None,
+        points: np.ndarray | None = None,
+    ) -> list[np.ndarray]:
+        return [
+            estimate_obstruction_mask(image, box)
+            for box in (boxes or [])
+        ]
