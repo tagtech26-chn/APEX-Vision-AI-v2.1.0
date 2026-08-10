@@ -3,9 +3,11 @@ name: APEX Vision AI v2.3 AI Accuracy Validation
 on:
   push:
     branches:
+      - main
       - feature/v2.1-production-hardening
   pull_request:
     branches:
+      - main
       - feature/v2.1-production-hardening
   workflow_dispatch:
 
