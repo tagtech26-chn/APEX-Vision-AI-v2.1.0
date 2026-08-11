@@ -1,16 +1,14 @@
 param(
-    [string]$Python = "",
+    [string]$Python = "D:\v22env\Scripts\python.exe",
     [switch]$SmokeModels
 )
 
 $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path -LiteralPath $PSScriptRoot).Path
-$V22Python = Join-Path -Path $RepoRoot -ChildPath ".venv-v22\Scripts\python.exe"
 if ([string]::IsNullOrWhiteSpace($Python)) {
-    $Python = $V22Python
+    $Python = "D:\v22env\Scripts\python.exe"
 }
 
-# Resolve relative Python paths from the repository root.
 if (-not [System.IO.Path]::IsPathRooted($Python)) {
     $Python = Join-Path -Path $RepoRoot -ChildPath $Python
 }
@@ -18,10 +16,8 @@ if (-not [System.IO.Path]::IsPathRooted($Python)) {
 if (-not (Test-Path -LiteralPath $Python -PathType Leaf)) {
     Write-Host "v2.2 Python environment not found:" -ForegroundColor Yellow
     Write-Host "  $Python" -ForegroundColor Yellow
-    Write-Host "Create it from the repository root with:" -ForegroundColor Cyan
-    Write-Host "  py -3.12 -m venv .venv-v22" -ForegroundColor White
-    Write-Host "Then run:" -ForegroundColor Cyan
-    Write-Host "  .\validate-v2.2.ps1" -ForegroundColor White
+    Write-Host "Pass the external environment explicitly, for example:" -ForegroundColor Cyan
+    Write-Host "  .\validate-v2.2.ps1 -Python D:\v22env\Scripts\python.exe" -ForegroundColor White
     throw "v2.2 Python environment not found."
 }
 
