@@ -42,18 +42,19 @@ def estimate_floor_mask(image: np.ndarray) -> np.ndarray:
     candidate = (dist <= threshold).astype(np.uint8) * 255
     candidate[:y0, :] = 0
 
-    # Retain only regions connected to the bottom edge. This prevents walls,
-    # windows and disconnected furniture patches from becoming floor islands.
-    bottom = np.zeros_like(candidate)
-    bottom[h - 2 : h, :] = candidate[h - 2 : h, :]
-    reachable = cv2.dilate(bottom, np.ones((9, 9), np.uint8), iterations=1)
-    for _ in range(20):
-        expanded = cv2.dilate(reachable, np.ones((7, 7), np.uint8), iterations=1)
-        expanded[candidate == 0] = 0
-        if np.array_equal(expanded, reachable):
-            break
-        reachable = expanded
-    mask = reachable
+    # Keep candidate regions connected to the bottom edge. A bounded dilation
+    # walk can stop before reaching the wall/floor transition on larger images,
+    # so use connected components to select every region touching the bottom.
+    # This preserves the full floor around rugs while still rejecting isolated
+    # wall/window/furniture islands.
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(candidate, 8)
+    bottom_band = max(2, min(8, h // 40))
+    touching = np.unique(labels[h - bottom_band :, :])
+    touching = touching[touching != 0]
+    if touching.size == 0:
+        return np.zeros((h, w), dtype=np.uint8)
+    mask = np.isin(labels, touching).astype(np.uint8) * 255
+
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
     mask[:y0, :] = 0
