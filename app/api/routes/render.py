@@ -107,7 +107,16 @@ async def render(request: RenderRequest):
 
     job_id = uuid.uuid4().hex[:10]
     _room_current[room_key] = job_id
-    _job(job_id, status="queued", progress=0.0, message="Queued", material_profile=request.material_profile)
+    _job(
+        job_id,
+        status="queued",
+        progress=0.0,
+        message="Queued",
+        material_profile=request.material_profile,
+        tile_size=request.tile_size,
+        grout_width=request.grout_width,
+        pattern=request.pattern,
+    )
     _executor.submit(
         _run_render_job,
         job_id,
@@ -119,6 +128,12 @@ async def render(request: RenderRequest):
         grout_color=tuple(request.grout_color),
         pattern=request.pattern,
         material_profile=request.material_profile,
+        smart_removal=request.smart_removal,
+        furniture_shadow=request.furniture_shadow,
+        enhance_lighting=request.enhance_lighting,
+        surface=request.surface,
+        environment=request.environment,
+        visualization_mode=request.visualization_mode,
     )
     return {"job_id": job_id, "status": "queued", "progress": 0.0, "message": "Queued", "material_profile": request.material_profile}
 
