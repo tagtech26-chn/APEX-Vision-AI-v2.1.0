@@ -8,40 +8,88 @@ import numpy as np
 from app.ai.segmentation.base import SamplerSegmenterMixin, Segmenter
 
 
-def estimate_floor_mask(image: np.ndarray) -> np.ndarray:
-    """Automatically estimate the visible floor mask.
+def _estimate_floor_boundary(image: np.ndarray) -> int:
+    """Estimate the wall/floor transition and return its y coordinate.
 
-    Uses adaptive LAB colour distance from a bottom-centre seed band, then
-    carves out high-texture regions (rugs, patterned furniture) that the
-    colour threshold cannot separate from the floor.
+    A colour-only floor classifier is unsafe for production because walls,
+    windows and pale furniture can have colours close to the floor.  The
+    strongest horizontal luminance transition in the lower-middle frame is a
+    useful geometric prior for indoor room photographs.  We deliberately bias
+    toward the lower half and smooth the profile so furniture edges do not win.
     """
     h, w = image.shape[:2]
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    gray = cv2.GaussianBlur(gray, (0, 0), max(1.0, w / 160.0))
 
-    y0 = int(h * 0.94)
-    x0, x1 = int(w * 0.20), int(w * 0.80)
-    if y0 >= h or x0 >= x1:
+    # Ignore the outer 15% where furniture/walls and image borders create
+    # strong unrelated edges.  Search the plausible wall/floor band.
+    x0, x1 = int(w * 0.15), int(w * 0.85)
+    y0, y1 = int(h * 0.42), int(h * 0.78)
+    if y1 <= y0 + 4:
+        return int(h * 0.62)
+
+    profile = np.mean(np.abs(np.diff(gray[y0:y1, x0:x1], axis=0)), axis=1)
+    profile = cv2.GaussianBlur(profile.reshape(-1, 1), (1,  nine := 9), 0).ravel()
+    peak = int(np.argmax(profile)) + y0
+
+    # A boundary that is too high usually means a window/console edge won.
+    # Keep the floor conservative; false positives are much worse than leaving
+    # a small amount of floor unpainted.
+    return int(np.clip(peak + max(4, int(h * 0.012)), h * 0.50, h * 0.76))
+
+
+def estimate_floor_mask(image: np.ndarray) -> np.ndarray:
+    """Estimate only the visible floor, with an explicit geometric prior.
+
+    The previous implementation selected the largest colour-similar region
+    from the bottom seed. In a real room this can connect the floor to walls,
+    windows and furniture. The new mask is constrained below the estimated
+    wall/floor boundary and must remain connected to the bottom of the frame.
+    """
+    h, w = image.shape[:2]
+    if h < 20 or w < 20:
         return np.zeros((h, w), dtype=np.uint8)
 
+    boundary = _estimate_floor_boundary(image)
+
     lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB).astype(np.float32)
-    seed = lab[y0:, x0:x1]
+    y0 = max(boundary, int(h * 0.58))
+    x0, x1 = int(w * 0.20), int(w * 0.80)
+    seed = lab[int(h * 0.90) :, x0:x1]
+    if seed.size == 0:
+        return np.zeros((h, w), dtype=np.uint8)
+
     seed_median = np.median(seed.reshape(-1, 3), axis=0)
+    dist = np.linalg.norm(lab - seed_median, axis=2)
+    seed_dist = dist[int(h * 0.90) :, x0:x1]
 
-    dist = np.abs(lab - seed_median).sum(axis=2)
-    region = dist[y0:, x0:x1]
-    threshold = float(np.maximum(region.mean() + 2.5 * region.std(), 12.0))
+    # Adaptive but deliberately conservative. A fixed lower bound prevents
+    # broad wall colours from becoming floor just because the floor is bright.
+    threshold = max(10.0, float(np.percentile(seed_dist, 90) * 2.0))
+    candidate = (dist <= threshold).astype(np.uint8) * 255
+    candidate[:y0, :] = 0
 
-    mask = (dist < threshold).astype(np.uint8) * 255
+    # Only retain regions that touch the bottom edge. This prevents windows and
+    # wall patches below the boundary from becoming disconnected floor islands.
+    bottom = np.zeros_like(candidate)
+    bottom[h - 2 : h, :] = candidate[h - 2 : h, :]
+    reachable = cv2.dilate(bottom, np.ones((9, 9), np.uint8), iterations=1)
+    for _ in range(20):
+        expanded = cv2.dilate(reachable, np.ones((7, 7), np.uint8), iterations=1)
+        expanded[candidate == 0] = 0
+        if np.array_equal(expanded, reachable):
+            break
+        reachable = expanded
+    mask = reachable
 
+    # Fill small holes caused by furniture legs/shadows, but never cross the
+    # geometric floor boundary.
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=3)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=2)
-    mask = _largest_component(mask)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+    mask[:y0, :] = 0
 
     mask = _carve_high_texture(mask, image)
-
-    fine = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, fine, iterations=1)
-
+    mask[:y0, :] = 0
     return mask.astype(np.uint8)
 
 
@@ -86,11 +134,7 @@ def estimate_obstruction_mask(
     image: np.ndarray,
     box: tuple[int, int, int, int],
 ) -> np.ndarray:
-    """Segment a detected foreground box without a learned model.
-
-    The mask starts from colour/texture separation inside the detector box and
-    is then dilated slightly so antialiased edges cannot leak tile pixels.
-    """
+    """Segment a detected foreground box without a learned model."""
     h, w = image.shape[:2]
     x1, y1, x2, y2 = [int(v) for v in box]
     x1, y1 = max(0, x1), max(0, y1)
@@ -102,42 +146,27 @@ def estimate_obstruction_mask(
     crop = image[y1:y2, x1:x2]
     lab = cv2.cvtColor(crop, cv2.COLOR_BGR2LAB).astype(np.float32)
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY).astype(np.float32)
-
-    # Border pixels are more likely to be floor/background. Use their robust
-    # statistics as the local background reference.
     bh, bw = crop.shape[:2]
     border = np.concatenate(
         [
-            lab[: max(2, bh // 10), :, :].reshape(-1, 3),
-            lab[-max(2, bh // 10) :, :, :].reshape(-1, 3),
-            lab[:, : max(2, bw // 10), :].reshape(-1, 3),
-            lab[:, -max(2, bw // 10) :, :].reshape(-1, 3),
+            lab[: max(2, bh // 10)].reshape(-1, 3),
+            lab[-max(2, bh // 10) :].reshape(-1, 3),
+            lab[:, : max(2, bw // 10)].reshape(-1, 3),
+            lab[:, -max(2, bw // 10) :].reshape(-1, 3),
         ],
         axis=0,
     )
     reference = np.median(border, axis=0)
     colour_distance = np.linalg.norm(lab - reference, axis=2)
-
     mean = cv2.boxFilter(gray, -1, (11, 11))
     mean2 = cv2.boxFilter(gray * gray, -1, (11, 11))
     local_std = np.sqrt(np.maximum(mean2 - mean * mean, 0.0))
-
     colour_threshold = max(12.0, float(np.percentile(colour_distance, 65)))
     texture_threshold = max(10.0, float(np.percentile(local_std, 72)))
-    candidate = (colour_distance > colour_threshold) | (
-        local_std > texture_threshold
-    )
+    candidate = ((colour_distance > colour_threshold) | (local_std > texture_threshold)).astype(np.uint8) * 255
+    candidate = cv2.morphologyEx(candidate, cv2.MORPH_CLOSE, np.ones((11, 11), np.uint8), iterations=2)
+    candidate = cv2.morphologyEx(candidate, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8), iterations=1)
 
-    candidate = (candidate.astype(np.uint8) * 255)
-    candidate = cv2.morphologyEx(
-        candidate, cv2.MORPH_CLOSE, np.ones((11, 11), np.uint8), iterations=2
-    )
-    candidate = cv2.morphologyEx(
-        candidate, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8), iterations=1
-    )
-
-    # Keep the dominant connected foreground region, but fall back to the box
-    # when the image is nearly uniform and there is no reliable separation.
     count, labels, stats, _ = cv2.connectedComponentsWithStats(candidate, 8)
     if count > 1:
         areas = stats[1:, cv2.CC_STAT_AREA]
@@ -173,7 +202,4 @@ class HeuristicSegmenter(SamplerSegmenterMixin, Segmenter):
         boxes: list[tuple[int, int, int, int]] | None = None,
         points: np.ndarray | None = None,
     ) -> list[np.ndarray]:
-        return [
-            estimate_obstruction_mask(image, box)
-            for box in (boxes or [])
-        ]
+        return [estimate_obstruction_mask(image, box) for box in (boxes or [])]
