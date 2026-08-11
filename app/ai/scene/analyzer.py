@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from pathlib import Path
 
@@ -125,7 +126,7 @@ class SceneAnalyzer:
 
     @staticmethod
     def _reclaim_object_floor_contacts(floor_mask: np.ndarray, depth: np.ndarray, plane: PlaneResult, protected_mask: np.ndarray) -> np.ndarray:
-        """Recover visible floor lost when SAM2 object masks touch furniture bases."""
+        """Recover visible floor lost when SAM object masks touch furniture bases."""
         if depth is None or protected_mask is None or not (protected_mask > 0).any():
             return floor_mask
         n0, n1, n2, d = plane.equation
@@ -157,7 +158,7 @@ class SceneAnalyzer:
 
     @staticmethod
     def _fill_floor_notches(mask: np.ndarray, image: np.ndarray) -> np.ndarray:
-        """Conservatively smooth small SAM2 boundary notches without filling walls."""
+        """Conservatively smooth small segmentation boundary notches."""
         binary = mask > 0
         if not binary.any():
             return mask
@@ -165,7 +166,7 @@ class SceneAnalyzer:
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
         smoothed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
         smoothed = cv2.bitwise_and(smoothed, mask | cv2.dilate(mask, np.ones((5, 5), np.uint8)))
-        smoothed[max(0, h - max(8, h // 30)) :] = 255
+        smoothed[max(8, h - max(8, h // 30)) :] = 255
         return smoothed.astype(np.uint8)
 
     @staticmethod
@@ -248,6 +249,8 @@ def build_scene_analyzer(provider: str | None = None) -> SceneAnalyzer:
         else:
             provider = "light"
             logger.info("Auto mode: heavy AI stack unavailable (%s); using heuristics.", ", ".join(missing))
+    if provider == "v22":
+        return _build_v22()
     if provider == "heavy":
         return _build_heavy()
     if provider == "light":
@@ -260,6 +263,28 @@ def _build_heavy() -> SceneAnalyzer:
     from app.ai.detection.grounding_dino import GroundingDINOProvider
     from app.ai.segmentation.sam2 import SAM2Provider
     return SceneAnalyzer(detector=GroundingDINOProvider(), segmenter=SAM2Provider(), depth=DepthAnythingProvider())
+
+
+def _build_v22() -> SceneAnalyzer:
+    """Build the isolated v2.2 geometry stack; never falls back silently."""
+    from app.ai.depth.metric3d import Metric3DProvider
+    from app.ai.depth.unidepth import UniDepthV2Provider
+    from app.ai.detection.grounding_dino import GroundingDINOProvider
+    from app.ai.scene.v22_analyzer import V22SceneAnalyzer
+    from app.ai.segmentation.sam3 import SAM3Provider
+
+    depth_name = os.getenv("APEX_V22_DEPTH", "metric3d").strip().lower()
+    device = os.getenv("APEX_V22_DEVICE", "auto").strip().lower()
+    resolved_device = None if device == "auto" else device
+    if depth_name == "metric3d":
+        depth = Metric3DProvider(device=resolved_device)
+    elif depth_name == "unidepth":
+        depth = UniDepthV2Provider(device=resolved_device)
+    else:
+        raise RuntimeError("APEX_V22_DEPTH must be 'metric3d' or 'unidepth'.")
+
+    segmenter = SAM3Provider(prompt="floor", device=resolved_device)
+    return V22SceneAnalyzer(detector=GroundingDINOProvider(), segmenter=segmenter, depth=depth)
 
 
 def _build_light() -> SceneAnalyzer:

@@ -53,7 +53,6 @@ class Settings:
     app_version: str = field(default_factory=lambda: _env("APEX_VERSION", "2.1.0"))
 
     project_root: Path = field(default_factory=lambda: Path(__file__).resolve().parent.parent.parent)
-
     assets_dir: Path = field(default_factory=Path)
     output_dir: Path = field(default_factory=Path)
     uploads_dir: Path = field(default_factory=Path)
@@ -62,10 +61,7 @@ class Settings:
 
     ai_provider: str = field(default_factory=lambda: _env("APEX_AI_PROVIDER", "auto").lower())
 
-    # Production network/security controls.
-    allowed_hosts: tuple[str, ...] = field(
-        default_factory=lambda: _env_list("APEX_ALLOWED_HOSTS", ("localhost", "127.0.0.1"))
-    )
+    allowed_hosts: tuple[str, ...] = field(default_factory=lambda: _env_list("APEX_ALLOWED_HOSTS", ("localhost", "127.0.0.1")))
     hsts_enabled: bool = field(default_factory=lambda: _env_bool("APEX_HSTS_ENABLED", False))
 
     grounding_dino_config: str = field(default_factory=lambda: _env("GROUNDING_DINO_CONFIG"))
@@ -92,7 +88,6 @@ class Settings:
         self.uploads_dir = Path(_env("APEX_UPLOADS", str(root / "uploads")))
         self.catalog_dir = Path(_env("APEX_CATALOG", str(root / "catalog")))
         self.scenes_dir = Path(_env("APEX_SCENES", str(self.assets_dir / "scenes")))
-
         for folder in (self.assets_dir, self.output_dir, self.uploads_dir, self.catalog_dir, self.scenes_dir):
             folder.mkdir(parents=True, exist_ok=True)
         self.validate()
@@ -103,8 +98,8 @@ class Settings:
             raise ValueError("APEX_PORT must be between 1 and 65535")
         if not self.app_version.strip():
             raise ValueError("APEX_VERSION must not be empty")
-        if self.ai_provider not in {"auto", "heavy", "light"}:
-            raise ValueError("APEX_AI_PROVIDER must be one of: auto, heavy, light")
+        if self.ai_provider not in {"auto", "heavy", "light", "v22"}:
+            raise ValueError("APEX_AI_PROVIDER must be one of: auto, heavy, light, v22")
         if not self.allowed_hosts:
             raise ValueError("APEX_ALLOWED_HOSTS must contain at least one host")
         if not 0.0 <= self.render_alpha <= 1.0:

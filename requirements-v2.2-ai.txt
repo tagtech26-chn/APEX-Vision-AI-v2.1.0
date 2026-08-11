@@ -1,0 +1,37 @@
+# APEX Vision AI v2.2 AI Geometry Lab
+# Install these separately from the production v2.1 environment.
+
+# Current host note:
+#   Python 3.11.9 + PyTorch 2.13.0+cpu + Intel UHD 630.
+#   This host has no CUDA GPU.
+#
+# Therefore the official SAM3 installation is NOT compatible with the current
+# v22env baseline: upstream currently documents Python 3.12+, PyTorch 2.7+
+# and a CUDA 12.6+ GPU for the standard supported installation.
+#
+# Keep the CPU environment intact until the model-validation target is chosen.
+# Do not replace the working v22env Torch installation with a speculative CUDA build.
+
+# Metric3Dv2
+# Upstream provides a PyTorch Hub path for metric3d_vit_small and requirements_v2.txt.
+#   pip install -r <Metric3D checkout>/requirements_v2.txt
+#   model = torch.hub.load('yvanyin/metric3d', 'metric3d_vit_small', pretrain=True)
+#
+# Metric3D supports metric depth and surface-normal estimation and is the preferred
+# candidate for the v2.2 geometry benchmark. See docs/V2.2_AI_GEOMETRY_LAB.md.
+
+# SAM3 / SAM3.1
+# Upstream standard installation currently requires Python 3.12+, PyTorch 2.7+
+# and CUDA 12.6+ hardware. Check upstream README before attempting installation.
+# Checkpoint download also requires approved Hugging Face access.
+#   git clone https://github.com/facebookresearch/sam3.git
+#   cd sam3
+#   pip install -e .
+#
+# setuptools<82 is retained for compatibility with environments that encounter
+# the upstream pkg_resources import issue.
+
+# UniDepthV2 benchmark (optional; not required for Metric3D mode)
+#   pip install git+https://github.com/lpiccinelli-eth/UniDepth.git
+#
+# APEX runtime dependencies remain supplied by requirements.txt.
