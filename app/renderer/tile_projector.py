@@ -5,6 +5,7 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
+from app.ai.scene.result import SceneResult
 from app.renderer.grout_engine import GroutEngine
 from app.renderer.mask_feather import MaskFeather
 from app.renderer.occlusion import OcclusionMask
@@ -15,9 +16,6 @@ from app.renderer.projection_scale import evaluate_projection_scale
 class TileProjector:
     """Wrap a physically scaled tile pattern into the room perspective."""
 
-    # A higher-resolution plane keeps tile faces and grout joints crisp before
-    # the final perspective warp. The room itself remains at the configured
-    # render resolution, so this does not increase the AI analysis resolution.
     PLANE_SPAN_PIXELS = 4096
     REFERENCE_FLOOR_MM = 7800
 
@@ -28,6 +26,7 @@ class TileProjector:
         self.debug = debug
         self.last_scale_diagnostics: dict[str, float | int] | None = None
         self.last_occlusion_diagnostics: dict[str, float | int | bool] | None = None
+        self.last_grout_mask: np.ndarray | None = None
 
     @staticmethod
     def _to_square(tile: np.ndarray) -> np.ndarray:
@@ -66,8 +65,6 @@ class TileProjector:
         if rows.size == 0:
             return 0.0, 0.0
 
-        # Sampling every pixel is unnecessary for the centre and can be very
-        # expensive on 4K rooms. A deterministic stride is sufficient.
         stride = max(1, int(np.sqrt(rows.size / 10000)))
         rows = rows[::stride]
         cols = cols[::stride]
@@ -90,6 +87,21 @@ class TileProjector:
         if span_x > canvas_size or span_y > canvas_size:
             return 0.0, 0.0
         return sx, sy
+
+    @staticmethod
+    def _grout_tile_mask(tile_pixels: int, tile_size_mm: int, grout_width_mm: int) -> np.ndarray:
+        """Create a binary grout mask aligned with the physical tile dimensions."""
+        mask = np.zeros((tile_pixels, tile_pixels, 3), dtype=np.uint8)
+        thickness = GroutEngine._thickness_pixels(tile_pixels, tile_size_mm, grout_width_mm)
+        if thickness <= 0:
+            return mask
+
+        thickness = min(thickness, max(1, tile_pixels // 8))
+        cv2.rectangle(mask, (0, 0), (tile_pixels - 1, thickness - 1), (255, 255, 255), -1)
+        cv2.rectangle(mask, (0, tile_pixels - thickness), (tile_pixels - 1, tile_pixels - 1), (255, 255, 255), -1)
+        cv2.rectangle(mask, (0, 0), (thickness - 1, tile_pixels - 1), (255, 255, 255), -1)
+        cv2.rectangle(mask, (tile_pixels - thickness, 0), (tile_pixels - 1, tile_pixels - 1), (255, 255, 255), -1)
+        return mask
 
     def project(
         self,
@@ -125,6 +137,11 @@ class TileProjector:
         )
         canvas = self.patterns.create(tile, pattern)
 
+        # Build a parallel seam mask from the same pattern generator. This
+        # prevents lighting/color matching from washing out grout joints.
+        grout_tile = self._grout_tile_mask(tile_pixels, tile_size_mm, grout_width)
+        grout_canvas = self.patterns.create(grout_tile, pattern)
+
         try:
             transform = np.linalg.inv(homography)
         except np.linalg.LinAlgError:
@@ -144,10 +161,20 @@ class TileProjector:
             borderMode=cv2.BORDER_CONSTANT,
             borderValue=(0, 0, 0),
         )
+        warped_grout = cv2.warpPerspective(
+            grout_canvas,
+            transform,
+            (width, height),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=(0, 0, 0),
+        )
+        self.last_grout_mask = (warped_grout[:, :, 0] > 80).astype(np.uint8)
 
         if self.debug:
             cv2.imwrite("output/debug_tile.png", tile)
             cv2.imwrite("output/debug_canvas.png", canvas)
+            cv2.imwrite("output/debug_grout_mask.png", self.last_grout_mask * 255)
             cv2.imwrite("output/debug_projection.png", warped)
 
         return warped
