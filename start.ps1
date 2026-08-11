@@ -80,17 +80,25 @@ if (-not $needsBuild) {
 }
 
 if ($needsBuild) {
-    $npm = Get-Command npm -ErrorAction SilentlyContinue
-    if (-not $npm) { Write-Error "Node.js/npm is required to build the frontend. Install Node.js or run 'npm run build' manually in frontend/." }
+    $npmCommand = Get-Command npm.cmd -ErrorAction SilentlyContinue
+    if (-not $npmCommand) { $npmCommand = Get-Command npm -ErrorAction SilentlyContinue }
+    if (-not $npmCommand) {
+        Write-Error "Node.js/npm is required to build the frontend. Install Node.js or run the frontend build manually."
+        exit 1
+    }
+
+    $npmPath = $npmCommand.Source
+    Write-Host "Using npm: $npmPath" -ForegroundColor DarkGray
+
     Set-Location $frontend
     if (-not (Test-Path $nodeModules)) {
         if (-not (Test-Path $packageLock)) { Write-Error "frontend/package-lock.json is missing; cannot perform a reproducible frontend install." }
         Write-Host "Installing frontend dependencies..." -ForegroundColor Yellow
-        & npm ci
+        & $npmPath ci
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
     Write-Host "Building latest frontend bundle..." -ForegroundColor Yellow
-    & npm run build
+    & $npmPath run build
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     Set-Location $Root
 }
