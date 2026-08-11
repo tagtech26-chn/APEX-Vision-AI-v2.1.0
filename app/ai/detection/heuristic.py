@@ -16,14 +16,7 @@ _FURNITURE_PROMPT = (
 
 
 class HeuristicDetector(ObjectDetector):
-    """Detect floor and conservative foreground obstructions without ML models.
-
-    The old light provider only understood the ``floor`` prompt.  Consequently
-    ``SceneAnalyzer._carve_obstructions`` received no furniture detections and
-    the tile projection was allowed to paint over sofas, chairs and tables.
-    This detector derives large, floor-interior regions that differ materially
-    from the floor seed and exposes them as obstruction boxes.
-    """
+    """Detect floor and conservative foreground obstructions without ML models."""
 
     name = "heuristic"
 
@@ -46,26 +39,38 @@ class HeuristicDetector(ObjectDetector):
 
     @staticmethod
     def _detect_obstructions(image: np.ndarray) -> list[Detection]:
-        """Find sizeable non-floor regions inside the estimated floor area."""
+        """Find sizeable foreground regions in the geometric floor envelope.
+
+        Do not restrict the candidate to ``estimate_floor_mask`` itself.  The
+        floor segmenter intentionally carves out high-contrast furniture, so
+        doing so here would remove the very pixels we need to detect.  Instead,
+        use the top of the estimated floor as a geometric envelope and compare
+        the image against a clean bottom-floor colour reference.
+        """
         floor = estimate_floor_mask(image)
         floor_bool = floor > 0
         if not floor_bool.any():
             return []
 
         h, w = image.shape[:2]
+        floor_rows = np.where(floor_bool.any(axis=1))[0]
+        floor_top = int(floor_rows.min())
+        if floor_top >= h - 4:
+            return []
+
         lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB).astype(np.float32)
 
-        # Use the same bottom-centre region that seeds floor estimation.  A
-        # robust median/MAD reference is less sensitive to a bright window or
-        # a dark rug than a single pixel sample.
-        y0 = max(0, int(h * 0.88))
+        # The bottom-centre region is deliberately used as the floor reference:
+        # it is least likely to contain walls, windows or furniture.
+        y0 = max(floor_top, int(h * 0.88))
         x0, x1 = int(w * 0.25), int(w * 0.75)
         seed = lab[y0:, x0:x1].reshape(-1, 3)
         if seed.size == 0:
             return []
+
         median = np.median(seed, axis=0)
         mad = np.median(np.abs(seed - median), axis=0)
-        scale = float(np.maximum(1.4826 * np.mean(mad), 4.0))
+        scale = float(max(4.0, 1.4826 * np.mean(mad)))
         colour_distance = np.linalg.norm(lab - median, axis=2)
 
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY).astype(np.float32)
@@ -73,33 +78,32 @@ class HeuristicDetector(ObjectDetector):
         mean2 = cv2.boxFilter(gray * gray, -1, (15, 15))
         local_std = np.sqrt(np.maximum(mean2 - mean * mean, 0.0))
 
-        floor_colour = colour_distance[floor_bool]
-        floor_texture = local_std[floor_bool]
-        colour_threshold = max(18.0, float(np.percentile(floor_colour, 92)) + 1.5 * scale)
-        texture_threshold = max(18.0, float(np.percentile(floor_texture, 94)) * 1.8)
+        # Keep the adaptive threshold conservative.  A high percentile derived
+        # from the already-carved floor mask misses uniform sofas/cabinets.
+        colour_threshold = max(18.0, 3.0 * scale)
+        texture_threshold = max(22.0, float(np.percentile(local_std[y0:, :], 90)) * 1.6)
 
-        candidate = floor_bool & (
-            (colour_distance > colour_threshold)
-            | (local_std > texture_threshold)
-        )
+        candidate = np.zeros((h, w), dtype=np.uint8)
+        candidate[floor_top:, :] = (
+            (colour_distance[floor_top:, :] > colour_threshold)
+            | (local_std[floor_top:, :] > texture_threshold)
+        ).astype(np.uint8) * 255
 
-        # Fill furniture interiors while preserving the actual floor boundary.
-        candidate_u8 = (candidate.astype(np.uint8) * 255)
-        candidate_u8 = cv2.morphologyEx(
-            candidate_u8,
+        candidate = cv2.morphologyEx(
+            candidate,
             cv2.MORPH_CLOSE,
             np.ones((17, 17), np.uint8),
             iterations=2,
         )
-        candidate_u8 = cv2.morphologyEx(
-            candidate_u8,
+        candidate = cv2.morphologyEx(
+            candidate,
             cv2.MORPH_OPEN,
             np.ones((7, 7), np.uint8),
             iterations=1,
         )
 
         count, labels, stats, _ = cv2.connectedComponentsWithStats(
-            candidate_u8, connectivity=8
+            candidate, connectivity=8
         )
         min_area = max(400, int(h * w * 0.002))
         max_area = int(h * w * 0.35)
@@ -124,7 +128,5 @@ class HeuristicDetector(ObjectDetector):
                 Detection(label="furniture", score=score, box=(x, y, x2, y2))
             )
 
-        # Largest regions are generally the sofa/chair/table bodies. Keeping a
-        # bounded list prevents texture noise from producing dozens of masks.
         detections.sort(key=lambda item: item.score, reverse=True)
         return detections[:8]
