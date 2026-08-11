@@ -1,0 +1,17 @@
+# APEX Vision AI v2.2 AI Geometry Lab
+# Install these separately from the production v2.1 environment.
+# SAM3.1 currently requires Python 3.12+, PyTorch 2.7+, and CUDA 12.6+ according to upstream.
+# The model checkpoint is gated and requires Hugging Face access approval.
+
+# Metric3Dv2
+# Install the upstream Metric3D v2 dependencies in the v2.2 environment:
+#   pip install -r <Metric3D checkout>/requirements_v2.txt
+# The APEX provider uses torch.hub to load metric3d_vit_small by default.
+
+# SAM3 / SAM3.1
+#   pip install git+https://github.com/facebookresearch/sam3.git
+
+# UniDepthV2 benchmark (optional; not required for Metric3D mode)
+#   pip install git+https://github.com/lpiccinelli-eth/UniDepth.git
+
+# APEX runtime dependencies remain supplied by requirements.txt.
