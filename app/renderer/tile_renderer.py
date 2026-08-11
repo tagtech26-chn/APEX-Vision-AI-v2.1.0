@@ -73,15 +73,8 @@ class TileRenderer:
             lighting = self.lighting.extract(scene.image, render_mask)
             projection = self.lighting.apply(projection, lighting, render_mask)
 
-        projection = self.matcher.match(
-            room=scene.image,
-            projection=projection,
-            floor_mask=render_mask,
-        )
+        projection = self.matcher.match(room=scene.image, projection=projection, floor_mask=render_mask)
 
-        # Keep grout joints visually legible after material/lighting/color
-        # processing. The seam mask is generated from the same physical tile
-        # geometry used for projection, so it remains aligned in perspective.
         grout_mask = self.projector.last_grout_mask
         if grout_mask is not None and grout_width > 0:
             gm = np.clip(grout_mask.astype(np.float32), 0.0, 1.0)[..., None]
@@ -118,11 +111,19 @@ class TileRenderer:
 
     @staticmethod
     def _floor_render_mask(scene: SceneResult) -> np.ndarray:
-        """Recover small AI-carving gaps at object/floor contact edges."""
+        """Return the AI floor mask without re-expanding v2.2 geometry.
+
+        v2.2 deliberately constrains metric refinement to semantic floor
+        support. Reclaiming pixels here would undo that guardrail and can
+        paint tile beneath cabinets/furniture or into kitchen boundaries.
+        """
         if scene.floor_mask is None:
             return np.zeros(scene.size[::-1], dtype=np.uint8)
 
         mask = scene.floor_mask.copy()
+        if scene.metadata.get("v22_geometry"):
+            return mask
+
         protected = scene.protected_object_mask
         depth = scene.depth_map
         if protected is None or depth is None or not (protected > 0).any():
@@ -142,7 +143,6 @@ class TileRenderer:
                 + float(normal[2]) * depth.astype(np.float32)
                 + distance
             )
-
             existing = residual[mask > 0]
             if existing.size < 500:
                 return mask
@@ -150,7 +150,6 @@ class TileRenderer:
             tolerance = float(np.percentile(existing, 97))
             object_band = cv2.dilate(protected, np.ones((17, 17), np.uint8))
             candidate = (object_band > 0) & (mask == 0) & (residual <= tolerance)
-
             recovered = cv2.morphologyEx(
                 candidate.astype(np.uint8) * 255,
                 cv2.MORPH_CLOSE,
