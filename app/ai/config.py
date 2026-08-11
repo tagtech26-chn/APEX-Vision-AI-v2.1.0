@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from app.core.config import settings
 
-VALID_PROVIDERS = {"auto", "heavy", "light"}
+VALID_PROVIDERS = {"auto", "heavy", "light", "v22"}
 
 DETECTION_PROMPTS = {
     "floor": "floor, ground, tiles, marble floor, ceramic floor",
@@ -26,17 +26,37 @@ def resolve_provider(requested: str | None = None) -> str:
 
 
 def heavy_models_available() -> tuple[bool, list[str]]:
-    """Return whether the heavy model stack is reachable plus the missing parts."""
+    """Return whether the original heavy model stack is reachable plus missing parts."""
     missing: list[str] = []
-
     try:
         import groundingdino  # noqa: F401
-    except Exception:  # pragma: no cover - environment dependent
+    except Exception:
         missing.append("groundingdino")
-
     try:
         import sam2  # noqa: F401
-    except Exception:  # pragma: no cover - environment dependent
+    except Exception:
         missing.append("sam2")
+    return (not missing), missing
 
+
+def v22_models_available() -> tuple[bool, list[str]]:
+    """Check only import-level availability; checkpoints remain lazy-loaded."""
+    missing: list[str] = []
+    try:
+        import sam3  # noqa: F401
+    except Exception:
+        missing.append("sam3")
+    depth = getattr(settings, "v22_depth_provider", "metric3d")
+    if depth == "metric3d":
+        try:
+            import torch  # noqa: F401
+        except Exception:
+            missing.append("torch")
+    elif depth == "unidepth":
+        try:
+            import unidepth  # noqa: F401
+        except Exception:
+            missing.append("unidepth")
+    else:
+        missing.append(f"unknown depth provider: {depth}")
     return (not missing), missing
