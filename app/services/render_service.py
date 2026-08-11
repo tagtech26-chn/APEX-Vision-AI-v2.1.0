@@ -195,7 +195,7 @@ class RenderService:
 
     def _cache_key(self, room_path: Path) -> str:
         provider = self.get_analyzer().providers["detector"]
-        return f"{room_path.stem}__{provider}__v6"
+        return f"{room_path.stem}__{provider}__v7"
 
     @staticmethod
     def _source_fingerprint(room_path: Path) -> str:
