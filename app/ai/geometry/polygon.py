@@ -28,30 +28,26 @@ class PolygonEngine:
         if len(polygon) == 4:
             return self.order_points(polygon.reshape(4, 2).astype(np.float32))
 
-        # Preserve perspective: fit a 4-corner quad from the contour hull.
         quad = self.quad_from_points(contour.reshape(-1, 2))
         return self.order_points(quad)
 
     @staticmethod
     def quad_from_points(points: np.ndarray) -> np.ndarray:
-        """Fit a perspective (4, 2) quad to arbitrary floor points.
-
-        Uses the convex hull of the points (which gives the outer floor
-        boundary and orders them consistently) and simplifies it to exactly
-        four corners so the homography preserves perspective.
-        """
+        """Fit a perspective quad to arbitrary floor points."""
         pts = np.asarray(points, dtype=np.float32)
         if pts.ndim != 2 or pts.shape[1] != 2 or len(pts) < 3:
             raise ValueError("At least three (x, y) points are required.")
 
         hull = cv2.convexHull(pts).reshape(-1, 2).astype(np.float32)
         if len(hull) <= 4:
-            quad = np.zeros((4, 2), dtype=np.float32)
-            quad[: len(hull)] = hull
+            if len(hull) == 4:
+                return hull
             if len(hull) == 3:
-                # Closed triangle: duplicate the first vertex to form a quad.
-                quad[3] = hull[0]
-            return quad
+                # Build a non-degenerate fourth point instead of duplicating a
+                # vertex, which would make getPerspectiveTransform unstable.
+                a, b, c = hull
+                fourth = b + c - a
+                return np.array([a, b, fourth, c], dtype=np.float32)
 
         while len(hull) > 4:
             worst: tuple[float, int] | None = None
@@ -70,18 +66,20 @@ class PolygonEngine:
 
     @staticmethod
     def order_points(pts: np.ndarray) -> np.ndarray:
-        """Order four points as TL, TR, BR, BL using angle sorting.
-
-        Robust for perspective quads (unlike the classic min/max sum method,
-        which assumes near axis-aligned rectangles).
-        """
+        """Order four points consistently as TL, TR, BR, BL."""
         pts = np.asarray(pts, dtype=np.float32)
         if pts.shape != (4, 2):
             raise ValueError("Exactly four points are required.")
 
-        center = pts.mean(axis=0)
-        angles = np.arctan2(pts[:, 1] - center[1], pts[:, 0] - center[0])
-        return pts[np.argsort(angles)]
+        # Stable image-coordinate ordering: top pair first, bottom pair last;
+        # then left-to-right within each pair. Angle sorting alone has no
+        # guaranteed starting corner and can silently rotate the homography.
+        y_order = np.argsort(pts[:, 1])
+        top = pts[y_order[:2]]
+        bottom = pts[y_order[2:]]
+        top = top[np.argsort(top[:, 0])]
+        bottom = bottom[np.argsort(bottom[:, 0])]
+        return np.array([top[0], top[1], bottom[1], bottom[0]], dtype=np.float32)
 
     @staticmethod
     def draw(
