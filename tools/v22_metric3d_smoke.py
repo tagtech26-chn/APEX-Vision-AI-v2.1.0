@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
 from pathlib import Path
 
 import torch
@@ -17,6 +18,7 @@ def main() -> None:
     if not HUBCONF.exists():
         raise SystemExit(f"Missing Metric3D hubconf.py: {HUBCONF}")
 
+    sys.path.insert(0, str(METRIC3D_ROOT))
     spec = importlib.util.spec_from_file_location("metric3d_hubconf", HUBCONF)
     if spec is None or spec.loader is None:
         raise SystemExit("Unable to load Metric3D hubconf.py")
@@ -24,6 +26,9 @@ def main() -> None:
     spec.loader.exec_module(module)
     print("Metric3D hubconf imported")
     print("ViT-Small factory:", hasattr(module, "metric3d_vit_small"))
+    import mmengine
+    print("mmengine:", mmengine.__version__)
+    print("mmcv import: SKIPPED (known Windows build blocker)")
 
 
 if __name__ == "__main__":
