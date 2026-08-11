@@ -18,6 +18,7 @@ from app.ai.scene.result import SceneResult
 from app.ai.segmentation.base import Segmenter
 
 logger = logging.getLogger("apex.ai")
+_ANALYZER_LOCK = None
 
 
 class SceneAnalyzer:
@@ -98,8 +99,6 @@ class SceneAnalyzer:
         obstruction = cv2.bitwise_or(obstruction, table_boxes_mask)
         protected_mask = cv2.bitwise_and(obstruction, floor_mask)
 
-        # Erode only thin object masks when carving so narrow floor regions are
-        # not lost. Full table boxes remain protected for final compositing.
         carve_mask = cv2.erode(obstruction, np.ones((31, 31), np.uint8))
         count, labels, stats, _ = cv2.connectedComponentsWithStats(obstruction)
         for idx in range(1, count):
@@ -144,18 +143,71 @@ class SceneAnalyzer:
         return result
 
     @staticmethod
+    def _reclaim_object_floor_contacts(
+        floor_mask: np.ndarray,
+        depth: np.ndarray,
+        plane: PlaneResult,
+        protected_mask: np.ndarray,
+    ) -> np.ndarray:
+        """Recover visible floor lost when SAM2 object masks touch furniture bases.
+
+        This is deliberately depth-gated: only pixels immediately adjacent to
+        an existing floor region and consistent with the estimated floor plane
+        are reclaimed. The protected object mask remains separate, so furniture
+        is still composited in front of the recovered floor.
+        """
+        if depth is None or protected_mask is None or not (protected_mask > 0).any():
+            return floor_mask
+
+        n0, n1, n2, d = plane.equation
+        ys, xs = np.mgrid[0 : floor_mask.shape[0], 0 : floor_mask.shape[1]]
+        resid = np.abs(n0 * xs + n1 * ys + n2 * depth.astype(np.float32) + d)
+        existing = resid[floor_mask > 0]
+        if existing.size < 500:
+            return floor_mask
+
+        tolerance = float(np.percentile(existing, 97))
+        near_object = cv2.dilate(protected_mask, np.ones((15, 15), np.uint8)) > 0
+        near_floor = cv2.dilate(floor_mask, np.ones((9, 9), np.uint8)) > 0
+        candidate = (
+            near_object
+            & near_floor
+            & (floor_mask == 0)
+            & (resid <= tolerance)
+        ).astype(np.uint8)
+
+        if not candidate.any():
+            return floor_mask
+
+        # Only accept components that touch the current floor within the small
+        # contact radius; this rejects wall/cabinet regions that happen to have
+        # similar depth values.
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(candidate, connectivity=8)
+        result = floor_mask.copy()
+        floor_seed = cv2.dilate(floor_mask, np.ones((5, 5), np.uint8)) > 0
+        accepted = 0
+        for idx in range(1, count):
+            component = labels == idx
+            if stats[idx, cv2.CC_STAT_AREA] < 6:
+                continue
+            if np.any(floor_seed & component):
+                result[component] = 255
+                accepted += int(stats[idx, cv2.CC_STAT_AREA])
+
+        if accepted:
+            logger.info("[AI] Reclaimed %d floor pixels at object/floor contact edges.", accepted)
+        return result
+
+    @staticmethod
     def _fill_floor_notches(mask: np.ndarray, image: np.ndarray) -> np.ndarray:
         """Conservatively smooth small SAM2 boundary notches without filling walls."""
         binary = mask > 0
         if not binary.any():
             return mask
         h, w = binary.shape
-        # Only operate below the detected floor's current top edge. A small
-        # closing is safer than the former LAB-lightness wall fill heuristic.
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
         smoothed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
         smoothed = cv2.bitwise_and(smoothed, mask | cv2.dilate(mask, np.ones((5, 5), np.uint8)))
-        # Preserve the original bottom support exactly.
         smoothed[max(0, h - max(8, h // 30)) :] = 255
         return smoothed.astype(np.uint8)
 
@@ -219,9 +271,21 @@ class SceneAnalyzer:
 
         if table_boxes:
             floor_mask = self._reclaim_under_tables(floor_mask, depth, plane, table_boxes)
-            scene.floor_mask = floor_mask
 
-        report(0.82, "Finalising floor mask...")
+        # Reclaim small visible floor strips lost around cabinets, chairs and
+        # other furniture before deriving the polygon/homography. This is the
+        # critical distinction between an object-aware mask and a simple box
+        # subtraction: the recovered floor can still be occluded by the exact
+        # protected object mask during compositing.
+        floor_mask = self._reclaim_object_floor_contacts(
+            floor_mask,
+            depth,
+            plane,
+            protected_mask,
+        )
+        scene.floor_mask = floor_mask
+
+        report(0.82, "Finalising floor geometry...")
         polygon = self.polygon_engine.extract(floor_mask)
         scene.floor_polygon = polygon
         homography = self.homography_engine.compute(polygon)
