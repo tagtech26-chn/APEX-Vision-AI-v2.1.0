@@ -12,6 +12,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $env:APEX_AI_PROVIDER = "v22"
+$env:APEX_VERSION = "2.2.0-ai-geometry-lab"
 $env:APEX_V22_DEPTH = $Depth
 $env:APEX_V22_DEVICE = if ($env:APEX_V22_DEVICE) { $env:APEX_V22_DEVICE } else { "auto" }
 
