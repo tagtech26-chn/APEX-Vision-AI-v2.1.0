@@ -14,7 +14,7 @@ from app.renderer.tile_projector import TileProjector
 
 
 class TileRenderer:
-    """Composites a material into a scene using a surface-specific profile."""
+    """Composite a material into a scene using a surface-specific profile."""
 
     def __init__(self, debug: bool = False) -> None:
         self.projector = TileProjector(debug=debug)
@@ -34,6 +34,10 @@ class TileRenderer:
         pattern: str = "Straight",
         material_profile: str = "generic",
         material_intelligence: dict[str, object] | None = None,
+        smart_removal: bool = True,
+        furniture_shadow: bool = True,
+        enhance_lighting: bool = True,
+        visualization_mode: str = "Realistic",
     ) -> np.ndarray:
         if scene.image is None:
             raise RuntimeError("Scene image missing.")
@@ -43,6 +47,7 @@ class TileRenderer:
             raise RuntimeError("Homography missing.")
 
         render_mask = self._floor_render_mask(scene)
+        protected = scene.protected_object_mask if smart_removal else None
 
         projection = self.projector.project(
             tile_image=tile,
@@ -64,8 +69,9 @@ class TileRenderer:
             texture_scale_factor=float((material_intelligence or {}).get("texture_scale_factor", 1.0)),
         )
 
-        lighting = self.lighting.extract(scene.image, render_mask)
-        projection = self.lighting.apply(projection, lighting, render_mask)
+        if enhance_lighting and visualization_mode == "Realistic":
+            lighting = self.lighting.extract(scene.image, render_mask)
+            projection = self.lighting.apply(projection, lighting, render_mask)
 
         projection = self.matcher.match(
             room=scene.image,
@@ -73,22 +79,33 @@ class TileRenderer:
             floor_mask=render_mask,
         )
 
-        protected = scene.protected_object_mask
         if protected is not None:
             scene.metadata.setdefault("occlusion", {})["applied"] = True
             scene.metadata["occlusion"]["protected_pixels"] = int((protected > 0).sum())
+        else:
+            scene.metadata.setdefault("occlusion", {})["applied"] = False
 
         result = self.projector.blend(
             room=scene.image,
             projection=projection,
             floor_mask=render_mask,
-            alpha=alpha,
+            alpha=alpha if visualization_mode == "Realistic" else min(alpha, 0.98),
             occlusion_mask=protected,
         )
         if self.projector.last_occlusion_diagnostics is not None:
-            scene.metadata.setdefault("occlusion", {}).update(
-                self.projector.last_occlusion_diagnostics
-            )
+            scene.metadata.setdefault("occlusion", {}).update(self.projector.last_occlusion_diagnostics)
+
+        # In realistic mode retain a restrained amount of original micro-shading
+        # so the material does not look like a flat sticker. Material Only is a
+        # deliberate clean product-preview mode.
+        if visualization_mode == "Realistic":
+            original = scene.image.astype(np.float32)
+            rendered = result.astype(np.float32)
+            gray = cv2.cvtColor(scene.image, cv2.COLOR_BGR2GRAY).astype(np.float32)
+            local = gray - cv2.GaussianBlur(gray, (0, 0), 9)
+            rendered += local[..., None] * 0.035
+            result = np.clip(rendered, 0, 255).astype(np.uint8)
+            _ = original
 
         return result
 
