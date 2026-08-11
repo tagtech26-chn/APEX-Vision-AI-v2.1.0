@@ -1,22 +1,45 @@
 param(
-    [string]$Python = (Join-Path $PSScriptRoot ".venv-v22\Scripts\python.exe"),
+    [string]$Python = "",
     [switch]$SmokeModels
 )
 
 $ErrorActionPreference = "Stop"
-if (-not (Test-Path $Python)) {
-    throw "v2.2 Python environment not found: $Python. Create .venv-v22 first."
+$RepoRoot = (Resolve-Path -LiteralPath $PSScriptRoot).Path
+$V22Python = Join-Path -Path $RepoRoot -ChildPath ".venv-v22\Scripts\python.exe"
+if ([string]::IsNullOrWhiteSpace($Python)) {
+    $Python = $V22Python
 }
+
+# Resolve relative Python paths from the repository root.
+if (-not [System.IO.Path]::IsPathRooted($Python)) {
+    $Python = Join-Path -Path $RepoRoot -ChildPath $Python
+}
+
+if (-not (Test-Path -LiteralPath $Python -PathType Leaf)) {
+    Write-Host "v2.2 Python environment not found:" -ForegroundColor Yellow
+    Write-Host "  $Python" -ForegroundColor Yellow
+    Write-Host "Create it from the repository root with:" -ForegroundColor Cyan
+    Write-Host "  py -3.12 -m venv .venv-v22" -ForegroundColor White
+    Write-Host "Then run:" -ForegroundColor Cyan
+    Write-Host "  .\validate-v2.2.ps1" -ForegroundColor White
+    throw "v2.2 Python environment not found."
+}
+
+Write-Host "Using v2.2 Python: $Python" -ForegroundColor Green
 
 Write-Host "[1/4] Python version" -ForegroundColor Cyan
 & $Python --version
+if ($LASTEXITCODE -ne 0) { throw "Unable to execute v2.2 Python." }
 
 Write-Host "[2/4] Compile all Python sources" -ForegroundColor Cyan
-& $Python -m compileall -q (Join-Path $PSScriptRoot "app") (Join-Path $PSScriptRoot "tests")
+$AppPath = Join-Path -Path $RepoRoot -ChildPath "app"
+$TestsPath = Join-Path -Path $RepoRoot -ChildPath "tests"
+& $Python -m compileall -q $AppPath $TestsPath
 if ($LASTEXITCODE -ne 0) { throw "Python compilation failed." }
 
 Write-Host "[3/4] Metric floor regression" -ForegroundColor Cyan
-& $Python -m pytest -q (Join-Path $PSScriptRoot "tests/test_v22_metric_floor.py")
+$TestPath = Join-Path -Path $RepoRoot -ChildPath "tests\test_v22_metric_floor.py"
+& $Python -m pytest -q $TestPath
 if ($LASTEXITCODE -ne 0) { throw "Metric floor regression failed." }
 
 Write-Host "[4/4] Provider import smoke" -ForegroundColor Cyan
