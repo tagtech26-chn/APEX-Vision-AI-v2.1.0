@@ -13,9 +13,12 @@ from app.renderer.projection_scale import evaluate_projection_scale
 
 
 class TileProjector:
-    """Wraps a patterned canvas into the room perspective."""
+    """Wrap a physically scaled tile pattern into the room perspective."""
 
-    PLANE_SPAN_PIXELS = 2048
+    # A higher-resolution plane keeps tile faces and grout joints crisp before
+    # the final perspective warp. The room itself remains at the configured
+    # render resolution, so this does not increase the AI analysis resolution.
+    PLANE_SPAN_PIXELS = 4096
     REFERENCE_FLOOR_MM = 7800
 
     def __init__(self, debug: bool = False) -> None:
@@ -28,7 +31,7 @@ class TileProjector:
 
     @staticmethod
     def _to_square(tile: np.ndarray) -> np.ndarray:
-        """Center-crop a texture swatch to a square so it isn't stretched."""
+        """Center-crop a texture swatch to a square without stretching it."""
         h, w = tile.shape[:2]
         if h == w:
             return tile
@@ -37,12 +40,20 @@ class TileProjector:
         x0 = (w - side) // 2
         return tile[y0 : y0 + side, x0 : x0 + side]
 
+    @staticmethod
+    def _preserve_texture_detail(tile: np.ndarray) -> np.ndarray:
+        """Recover fine ceramic/stone detail lost in catalogue thumbnails."""
+        if min(tile.shape[:2]) < 32:
+            return tile
+        blur = cv2.GaussianBlur(tile, (0, 0), 1.0)
+        return cv2.addWeighted(tile, 1.12, blur, -0.12, 0)
+
     def _tile_pixels(self, tile_size_mm: int) -> int:
         """Return projected tile size in the fixed physical floor canvas."""
         size = max(100, int(tile_size_mm))
         tiles_across = int(round(self.REFERENCE_FLOOR_MM / size))
         tiles_across = max(3, min(tiles_across, 40))
-        return max(48, self.PLANE_SPAN_PIXELS // tiles_across)
+        return max(64, self.PLANE_SPAN_PIXELS // tiles_across)
 
     @staticmethod
     def _plane_shift(
@@ -50,14 +61,17 @@ class TileProjector:
         floor_mask: np.ndarray,
         canvas_size: int,
     ) -> tuple[float, float]:
-        """Shift (px) to centre the floor mask in the pattern canvas."""
+        """Shift the pattern to the centre of the projected floor bounds."""
         rows, cols = np.where(floor_mask > 0)
         if rows.size == 0:
             return 0.0, 0.0
 
-        points = np.stack(
-            [cols, rows, np.ones_like(cols, dtype=np.float64)], axis=-1
-        )
+        # Sampling every pixel is unnecessary for the centre and can be very
+        # expensive on 4K rooms. A deterministic stride is sufficient.
+        stride = max(1, int(np.sqrt(rows.size / 10000)))
+        rows = rows[::stride]
+        cols = cols[::stride]
+        points = np.stack([cols, rows, np.ones_like(cols, dtype=np.float64)], axis=-1)
         plane = points @ homography.T
         denominator = plane[:, 2]
         valid = np.abs(denominator) > 1e-10
@@ -101,8 +115,14 @@ class TileProjector:
         ).as_dict()
 
         tile = self._to_square(tile_image)
-        tile = cv2.resize(tile, (tile_pixels, tile_pixels), interpolation=cv2.INTER_CUBIC)
-        tile = self.grout.apply(tile=tile, grout_width_mm=grout_width, grout_color=grout_color)
+        tile = self._preserve_texture_detail(tile)
+        tile = cv2.resize(tile, (tile_pixels, tile_pixels), interpolation=cv2.INTER_LANCZOS4)
+        tile = self.grout.apply(
+            tile=tile,
+            grout_width_mm=grout_width,
+            grout_color=grout_color,
+            tile_size_mm=tile_size_mm,
+        )
         canvas = self.patterns.create(tile, pattern)
 
         try:
@@ -120,7 +140,7 @@ class TileProjector:
             canvas,
             transform,
             (width, height),
-            flags=cv2.INTER_LINEAR,
+            flags=cv2.INTER_CUBIC,
             borderMode=cv2.BORDER_CONSTANT,
             borderValue=(0, 0, 0),
         )
@@ -140,12 +160,9 @@ class TileProjector:
         alpha: float = 0.92,
         occlusion_mask: np.ndarray | None = None,
     ) -> np.ndarray:
-        """Blend projection over the floor while preserving protected objects."""
-        mask = self.feather.feather(floor_mask, radius=31)
-        self.last_occlusion_diagnostics = OcclusionMask.leakage_diagnostics(
-            mask,
-            occlusion_mask,
-        )
+        """Blend the projection over the floor while preserving foreground objects."""
+        mask = self.feather.feather(floor_mask, radius=17)
+        self.last_occlusion_diagnostics = OcclusionMask.leakage_diagnostics(mask, occlusion_mask)
         mask = OcclusionMask.apply(mask, occlusion_mask)[..., None]
 
         room = room.astype(np.float32)
