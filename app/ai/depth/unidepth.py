@@ -13,7 +13,7 @@ class UniDepthV2Provider(DepthEstimator):
 
     name = "unidepth_v2"
 
-    def __init__(self, model_name: str = "lpiccinelli/UniDepth-v2-vitl14", device: str | None = None) -> None:
+    def __init__(self, model_name: str = "lpiccinelli/unidepth-v2-vitl14", device: str | None = None) -> None:
         import torch
         from unidepth.models import UniDepthV2
 
