@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
 
 import cv2
@@ -18,7 +19,7 @@ from app.ai.scene.result import SceneResult
 from app.ai.segmentation.base import Segmenter
 
 logger = logging.getLogger("apex.ai")
-_ANALYZER_LOCK = None
+_ANALYZER_LOCK = threading.Lock()
 
 
 class SceneAnalyzer:
@@ -47,29 +48,19 @@ class SceneAnalyzer:
         scale = limit / largest
         return cv2.resize(image, (int(width * scale), int(height * scale)), interpolation=cv2.INTER_AREA)
 
-    def _carve_obstructions(
-        self,
-        image: np.ndarray,
-        floor_mask: np.ndarray,
-    ) -> tuple[np.ndarray, list[tuple[int, int, int, int]], np.ndarray]:
+    def _carve_obstructions(self, image: np.ndarray, floor_mask: np.ndarray) -> tuple[np.ndarray, list[tuple[int, int, int, int]], np.ndarray]:
         """Subtract foreground objects while preserving their exact occlusion mask."""
         empty = np.zeros_like(floor_mask)
         if not hasattr(self.segmenter, "segment_many"):
             return floor_mask, [], empty
-
         try:
-            detections = self.detector.detect(
-                image,
-                "sofa. couch. armchair. chair. table. rug. plant. lamp. cabinet.",
-            )
+            detections = self.detector.detect(image, "sofa. couch. armchair. chair. table. rug. plant. lamp. cabinet.")
         except Exception as exc:
             logger.warning("Obstruction detection failed (%s); skipping carve.", exc)
             return floor_mask, [], empty
-
         boxes = [d.box for d in detections]
         if not boxes:
             return floor_mask, [], empty
-
         try:
             masks = self.segmenter.segment_many(image, boxes=boxes)
         except Exception as exc:
@@ -98,7 +89,6 @@ class SceneAnalyzer:
 
         obstruction = cv2.bitwise_or(obstruction, table_boxes_mask)
         protected_mask = cv2.bitwise_and(obstruction, floor_mask)
-
         carve_mask = cv2.erode(obstruction, np.ones((31, 31), np.uint8))
         count, labels, stats, _ = cv2.connectedComponentsWithStats(obstruction)
         for idx in range(1, count):
@@ -106,17 +96,11 @@ class SceneAnalyzer:
                 carve_mask[labels == idx] = 255
         carve_mask = cv2.bitwise_or(carve_mask, table_boxes_mask)
         carve_mask = cv2.bitwise_and(carve_mask, floor_mask)
-
         cleaned = cv2.subtract(floor_mask, carve_mask)
         return self._largest_component(cleaned), table_box_list, protected_mask
 
     @staticmethod
-    def _reclaim_under_tables(
-        floor_mask: np.ndarray,
-        depth: np.ndarray,
-        plane: PlaneResult,
-        table_boxes: list[tuple[int, int, int, int]],
-    ) -> np.ndarray:
+    def _reclaim_under_tables(floor_mask: np.ndarray, depth: np.ndarray, plane: PlaneResult, table_boxes: list[tuple[int, int, int, int]]) -> np.ndarray:
         if not table_boxes or depth is None:
             return floor_mask
         n0, n1, n2, d = plane.equation
@@ -130,10 +114,7 @@ class SceneAnalyzer:
         result = floor_mask.copy()
         for x0, y0, x1, y1 in table_boxes:
             candidates = np.zeros_like(floor_mask, dtype=bool)
-            candidates[y0:y1, x0:x1] = (
-                (resid[y0:y1, x0:x1] <= tolerance)
-                & (floor_mask[y0:y1, x0:x1] == 0)
-            )
+            candidates[y0:y1, x0:x1] = (resid[y0:y1, x0:x1] <= tolerance) & (floor_mask[y0:y1, x0:x1] == 0)
             if not candidates.any():
                 continue
             count, labels, _, _ = cv2.connectedComponentsWithStats(candidates.astype(np.uint8), connectivity=8)
@@ -143,45 +124,22 @@ class SceneAnalyzer:
         return result
 
     @staticmethod
-    def _reclaim_object_floor_contacts(
-        floor_mask: np.ndarray,
-        depth: np.ndarray,
-        plane: PlaneResult,
-        protected_mask: np.ndarray,
-    ) -> np.ndarray:
-        """Recover visible floor lost when SAM2 object masks touch furniture bases.
-
-        This is deliberately depth-gated: only pixels immediately adjacent to
-        an existing floor region and consistent with the estimated floor plane
-        are reclaimed. The protected object mask remains separate, so furniture
-        is still composited in front of the recovered floor.
-        """
+    def _reclaim_object_floor_contacts(floor_mask: np.ndarray, depth: np.ndarray, plane: PlaneResult, protected_mask: np.ndarray) -> np.ndarray:
+        """Recover visible floor lost when SAM2 object masks touch furniture bases."""
         if depth is None or protected_mask is None or not (protected_mask > 0).any():
             return floor_mask
-
         n0, n1, n2, d = plane.equation
         ys, xs = np.mgrid[0 : floor_mask.shape[0], 0 : floor_mask.shape[1]]
         resid = np.abs(n0 * xs + n1 * ys + n2 * depth.astype(np.float32) + d)
         existing = resid[floor_mask > 0]
         if existing.size < 500:
             return floor_mask
-
         tolerance = float(np.percentile(existing, 97))
         near_object = cv2.dilate(protected_mask, np.ones((15, 15), np.uint8)) > 0
         near_floor = cv2.dilate(floor_mask, np.ones((9, 9), np.uint8)) > 0
-        candidate = (
-            near_object
-            & near_floor
-            & (floor_mask == 0)
-            & (resid <= tolerance)
-        ).astype(np.uint8)
-
+        candidate = (near_object & near_floor & (floor_mask == 0) & (resid <= tolerance)).astype(np.uint8)
         if not candidate.any():
             return floor_mask
-
-        # Only accept components that touch the current floor within the small
-        # contact radius; this rejects wall/cabinet regions that happen to have
-        # similar depth values.
         count, labels, stats, _ = cv2.connectedComponentsWithStats(candidate, connectivity=8)
         result = floor_mask.copy()
         floor_seed = cv2.dilate(floor_mask, np.ones((5, 5), np.uint8)) > 0
@@ -193,7 +151,6 @@ class SceneAnalyzer:
             if np.any(floor_seed & component):
                 result[component] = 255
                 accepted += int(stats[idx, cv2.CC_STAT_AREA])
-
         if accepted:
             logger.info("[AI] Reclaimed %d floor pixels at object/floor contact edges.", accepted)
         return result
@@ -252,11 +209,7 @@ class SceneAnalyzer:
         floor_mask, table_boxes, protected_mask = self._carve_obstructions(image, floor_mask)
         scene.floor_mask = floor_mask
         scene.protected_object_mask = protected_mask
-        scene.metadata["occlusion"] = {
-            "provider": self.detector.name,
-            "protected_pixels": int((protected_mask > 0).sum()),
-            "enabled": bool((protected_mask > 0).any()),
-        }
+        scene.metadata["occlusion"] = {"provider": self.detector.name, "protected_pixels": int((protected_mask > 0).sum()), "enabled": bool((protected_mask > 0).any())}
 
         report(0.55, "Building depth map...")
         depth = self.depth.predict(image)
@@ -271,18 +224,7 @@ class SceneAnalyzer:
 
         if table_boxes:
             floor_mask = self._reclaim_under_tables(floor_mask, depth, plane, table_boxes)
-
-        # Reclaim small visible floor strips lost around cabinets, chairs and
-        # other furniture before deriving the polygon/homography. This is the
-        # critical distinction between an object-aware mask and a simple box
-        # subtraction: the recovered floor can still be occluded by the exact
-        # protected object mask during compositing.
-        floor_mask = self._reclaim_object_floor_contacts(
-            floor_mask,
-            depth,
-            plane,
-            protected_mask,
-        )
+        floor_mask = self._reclaim_object_floor_contacts(floor_mask, depth, plane, protected_mask)
         scene.floor_mask = floor_mask
 
         report(0.82, "Finalising floor geometry...")
@@ -290,20 +232,13 @@ class SceneAnalyzer:
         scene.floor_polygon = polygon
         homography = self.homography_engine.compute(polygon)
         scene.homography = homography.matrix
-        scene.metadata["floor_geometry"] = {
-            "polygon": polygon.astype(float).tolist(),
-            "homography_condition": float(np.linalg.cond(homography.matrix)),
-        }
+        scene.metadata["floor_geometry"] = {"polygon": polygon.astype(float).tolist(), "homography_condition": float(np.linalg.cond(homography.matrix))}
         report(0.9, "Scene ready")
         return scene
 
 
 def build_scene_analyzer(provider: str | None = None) -> SceneAnalyzer:
-    """Build a SceneAnalyzer using the requested provider stack.
-
-    Explicit ``heavy`` is fail-fast: production must never silently render with
-    the heuristic provider when Heavy AI has been requested.
-    """
+    """Build a SceneAnalyzer using the requested provider stack."""
     provider = resolve_provider(provider)
     if provider == "auto":
         available, missing = heavy_models_available()
@@ -313,7 +248,6 @@ def build_scene_analyzer(provider: str | None = None) -> SceneAnalyzer:
         else:
             provider = "light"
             logger.info("Auto mode: heavy AI stack unavailable (%s); using heuristics.", ", ".join(missing))
-
     if provider == "heavy":
         return _build_heavy()
     if provider == "light":
@@ -325,21 +259,11 @@ def _build_heavy() -> SceneAnalyzer:
     from app.ai.depth.depth_anything import DepthAnythingProvider
     from app.ai.detection.grounding_dino import GroundingDINOProvider
     from app.ai.segmentation.sam2 import SAM2Provider
-
-    return SceneAnalyzer(
-        detector=GroundingDINOProvider(),
-        segmenter=SAM2Provider(),
-        depth=DepthAnythingProvider(),
-    )
+    return SceneAnalyzer(detector=GroundingDINOProvider(), segmenter=SAM2Provider(), depth=DepthAnythingProvider())
 
 
 def _build_light() -> SceneAnalyzer:
     from app.ai.depth.heuristic import HeuristicDepth
     from app.ai.detection.heuristic import HeuristicDetector
     from app.ai.segmentation.heuristic import HeuristicSegmenter
-
-    return SceneAnalyzer(
-        detector=HeuristicDetector(),
-        segmenter=HeuristicSegmenter(),
-        depth=HeuristicDepth(),
-    )
+    return SceneAnalyzer(detector=HeuristicDetector(), segmenter=HeuristicSegmenter(), depth=HeuristicDepth())
