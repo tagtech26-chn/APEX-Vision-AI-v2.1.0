@@ -17,7 +17,8 @@ $env:APEX_V22_DEPTH = $Depth
 $env:APEX_V22_DEVICE = if ($env:APEX_V22_DEVICE) { $env:APEX_V22_DEVICE } else { "auto" }
 
 Write-Host "APEX Vision AI v2.2 AI Geometry Lab" -ForegroundColor Green
-Write-Host "Provider: v22 | Segmentation: SAM3.1 | Depth: $Depth | Device: $env:APEX_V22_DEVICE" -ForegroundColor Cyan
+Write-Host "Provider: v22 | Segmentation: SAM3 concept | Depth: $Depth | Device: $env:APEX_V22_DEVICE" -ForegroundColor Cyan
+Write-Host "SAM3.1 multiplex is reserved for the future video/multi-object path." -ForegroundColor DarkGray
 Write-Host "Production v2.1 configuration is not modified." -ForegroundColor DarkGray
 
 & (Join-Path $PSScriptRoot "start.ps1") -Port $Port -HostAddr $HostAddr -Python $Python
