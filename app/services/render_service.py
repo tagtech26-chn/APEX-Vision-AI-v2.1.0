@@ -82,6 +82,12 @@ class RenderService:
         pattern: str = "Straight",
         material_profile: str = "auto",
         alpha: float = 0.92,
+        smart_removal: bool = True,
+        furniture_shadow: bool = True,
+        enhance_lighting: bool = True,
+        surface: str = "Floor",
+        environment: str = "Interior",
+        visualization_mode: str = "Realistic",
         progress_cb=None,
     ) -> str:
         started = time.perf_counter()
@@ -142,10 +148,20 @@ class RenderService:
             }
             scene.metadata["material_classification"] = material_intelligence
 
+        scene.metadata["visualizer_options"] = {
+            "smart_removal": smart_removal,
+            "furniture_shadow": furniture_shadow,
+            "enhance_lighting": enhance_lighting,
+            "surface": surface,
+            "environment": environment,
+            "visualization_mode": visualization_mode,
+        }
+
         report(0.92, "Rendering tiles...")
         logger.info(
-            "Rendering room=%s tile=%s size=%smm grout=%s pattern=%s material=%s finish=%s",
+            "Rendering room=%s tile=%s size=%smm grout=%s pattern=%s material=%s finish=%s lighting=%s shadow=%s removal=%s",
             room_key, tile_path.name, tile_size_mm, grout_width, pattern, resolved_profile, material_intelligence["finish"],
+            enhance_lighting, furniture_shadow, smart_removal,
         )
         render_started = time.perf_counter()
         result = self.renderer.render(
@@ -158,6 +174,10 @@ class RenderService:
             alpha=alpha,
             material_profile=resolved_profile,
             material_intelligence=material_intelligence,
+            smart_removal=smart_removal,
+            furniture_shadow=furniture_shadow,
+            enhance_lighting=enhance_lighting,
+            visualization_mode=visualization_mode,
         )
         render_metrics.stage("render", time.perf_counter() - render_started)
 
