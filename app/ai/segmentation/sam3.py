@@ -1,4 +1,4 @@
-"""Optional SAM3.1 text-prompt segmenter for the v2.2 geometry lab."""
+"""Optional SAM3 concept segmentation for the v2.2 geometry lab."""
 
 from __future__ import annotations
 
@@ -8,19 +8,22 @@ from app.ai.segmentation.base import Segmenter
 
 
 class SAM3Provider(Segmenter):
-    """SAM3.1 text-prompt segmentation with lazy checkpoint loading."""
+    """SAM3 image concept segmentation used by the v2.2 single-image pipeline."""
 
-    name = "sam3.1"
+    name = "sam3_concept"
 
     def __init__(self, prompt: str = "floor", device: str | None = None) -> None:
         import torch
         from sam3.model_builder import build_sam3_image_model, download_ckpt_from_hf
         from sam3.model.sam3_image_processor import Sam3Processor
 
-        self.torch = torch
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.prompt = prompt
-        checkpoint = download_ckpt_from_hf(version="sam3.1")
+        # SAM3.1's released 3.5 GB checkpoint is the multiplex video model.
+        # The image segmentation model remains the SAM3 image checkpoint, so use
+        # that checkpoint here rather than attempting to load a video checkpoint
+        # into the image model.
+        checkpoint = download_ckpt_from_hf(version="sam3")
         self.model = build_sam3_image_model(
             checkpoint_path=checkpoint,
             load_from_HF=False,
