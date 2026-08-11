@@ -6,7 +6,7 @@ on:
       - feature/v2.2-ai-geometry-lab
   pull_request:
     branches:
-      - feature/v2.2-ai-geometry-lab
+      - feature/v2.1-production-hardening
 
 jobs:
   geometry-validation:
