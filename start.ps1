@@ -86,11 +86,11 @@ if ($needsBuild) {
     if (-not (Test-Path $nodeModules)) {
         if (-not (Test-Path $packageLock)) { Write-Error "frontend/package-lock.json is missing; cannot perform a reproducible frontend install." }
         Write-Host "Installing frontend dependencies..." -ForegroundColor Yellow
-        & $npm.Source ci
+        & npm ci
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
     Write-Host "Building latest frontend bundle..." -ForegroundColor Yellow
-    & $npm.Source run build
+    & npm run build
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     Set-Location $Root
 }
