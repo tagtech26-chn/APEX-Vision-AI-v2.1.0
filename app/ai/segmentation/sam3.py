@@ -14,13 +14,18 @@ class SAM3Provider(Segmenter):
 
     def __init__(self, prompt: str = "floor", device: str | None = None) -> None:
         import torch
-        from sam3.model_builder import build_sam3_image_model
+        from sam3.model_builder import build_sam3_image_model, download_ckpt_from_hf
         from sam3.model.sam3_image_processor import Sam3Processor
 
         self.torch = torch
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.prompt = prompt
-        self.model = build_sam3_image_model(load_from_HF=True, device=self.device)
+        checkpoint = download_ckpt_from_hf(version="sam3.1")
+        self.model = build_sam3_image_model(
+            checkpoint_path=checkpoint,
+            load_from_HF=False,
+            device=self.device,
+        )
         self.processor = Sam3Processor(self.model)
 
     @staticmethod
