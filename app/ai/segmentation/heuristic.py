@@ -16,10 +16,23 @@ def _estimate_floor_boundary(image: np.ndarray) -> int:
     x0, x1 = int(w * 0.15), int(w * 0.85)
     y0, y1 = int(h * 0.42), int(h * 0.78)
     if y1 <= y0 + 4:
-        return int(h * 0.62)
+        return int(h * 0.30)
+
     profile = np.mean(np.abs(np.diff(gray[y0:y1, x0:x1], axis=0)), axis=1)
     profile = cv2.GaussianBlur(profile.reshape(-1, 1), (1, 9), 0).ravel()
-    peak = int(np.argmax(profile)) + y0
+    peak_index = int(np.argmax(profile))
+    peak = peak_index + y0
+
+    # A very weak edge is not reliable evidence of a wall/floor boundary.
+    # This occurs in uniformly lit synthetic scenes and in photographs where
+    # the floor/wall colours are very similar. In that case use a broad lower
+    # frame prior so textured floor coverings can be carved without discarding
+    # most of the otherwise valid floor.
+    baseline = float(np.median(profile))
+    peak_strength = float(profile[peak_index] - baseline)
+    if peak_strength < max(1.0, float(np.std(profile) * 2.5)):
+        return int(h * 0.30)
+
     return int(np.clip(peak + max(4, int(h * 0.012)), h * 0.50, h * 0.76))
 
 
