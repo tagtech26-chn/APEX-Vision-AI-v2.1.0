@@ -1,22 +1,6 @@
 <#
 .SYNOPSIS
     Starts the APEX Vision AI production server (single service: SPA + API).
-
-.DESCRIPTION
-    Loads models.env (heavy model paths, created by setup-windows.ps1 /
-    download-heavy-models.ps1) if present, then runs uvicorn with a single
-    worker. Production defaults to the Heavy AI provider. Set
-    APEX_AI_PROVIDER=auto or light explicitly when a fallback is required.
-
-    A local cache signing key is generated once when one is not supplied.
-    The frontend is automatically rebuilt when its source is newer than the
-    current production bundle, preventing stale UI changes from being served.
-
-.PARAMETER Port
-    Port to bind. Default 8000.
-
-.PARAMETER HostAddr
-    Address to bind. Default 0.0.0.0.
 #>
 param(
     [ValidateRange(1, 65535)][int]$Port = 8000,
@@ -80,25 +64,36 @@ if (-not $needsBuild) {
 }
 
 if ($needsBuild) {
-    $npmCommand = Get-Command npm.cmd -ErrorAction SilentlyContinue
-    if (-not $npmCommand) { $npmCommand = Get-Command npm -ErrorAction SilentlyContinue }
+    $npmCommand = $null
+    $npmCmdPath = Join-Path $env:ProgramFiles "nodejs\npm.cmd"
+    if (Test-Path $npmCmdPath) {
+        $npmCommand = $npmCmdPath
+    }
+    else {
+        $npmCommandInfo = Get-Command npm.cmd -ErrorAction SilentlyContinue
+        if ($npmCommandInfo) { $npmCommand = $npmCommandInfo.Source }
+    }
     if (-not $npmCommand) {
-        Write-Error "Node.js/npm is required to build the frontend. Install Node.js or run the frontend build manually."
+        $npmCommandInfo = Get-Command npm -ErrorAction SilentlyContinue
+        if ($npmCommandInfo) { $npmCommand = $npmCommandInfo.Source }
+    }
+    if (-not $npmCommand) {
+        Write-Error "Node.js/npm is required to build the frontend. Install Node.js and ensure npm.cmd is available."
         exit 1
     }
 
-    $npmPath = $npmCommand.Source
-    Write-Host "Using npm: $npmPath" -ForegroundColor DarkGray
-
+    Write-Host "Using npm: $npmCommand" -ForegroundColor DarkGray
     Set-Location $frontend
+
     if (-not (Test-Path $nodeModules)) {
         if (-not (Test-Path $packageLock)) { Write-Error "frontend/package-lock.json is missing; cannot perform a reproducible frontend install." }
         Write-Host "Installing frontend dependencies..." -ForegroundColor Yellow
-        & $npmPath ci
+        & $npmCommand ci
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
+
     Write-Host "Building latest frontend bundle..." -ForegroundColor Yellow
-    & $npmPath run build
+    & $npmCommand run build
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     Set-Location $Root
 }
