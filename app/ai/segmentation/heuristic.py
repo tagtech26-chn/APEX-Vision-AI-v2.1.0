@@ -9,49 +9,32 @@ from app.ai.segmentation.base import SamplerSegmenterMixin, Segmenter
 
 
 def _estimate_floor_boundary(image: np.ndarray) -> int:
-    """Estimate the wall/floor transition and return its y coordinate.
-
-    A colour-only floor classifier is unsafe for production because walls,
-    windows and pale furniture can have colours close to the floor.  The
-    strongest horizontal luminance transition in the lower-middle frame is a
-    useful geometric prior for indoor room photographs.  We deliberately bias
-    toward the lower half and smooth the profile so furniture edges do not win.
-    """
+    """Estimate the wall/floor transition using a smoothed horizontal edge profile."""
     h, w = image.shape[:2]
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY).astype(np.float32)
     gray = cv2.GaussianBlur(gray, (0, 0), max(1.0, w / 160.0))
 
-    # Ignore the outer 15% where furniture/walls and image borders create
-    # strong unrelated edges.  Search the plausible wall/floor band.
     x0, x1 = int(w * 0.15), int(w * 0.85)
     y0, y1 = int(h * 0.42), int(h * 0.78)
     if y1 <= y0 + 4:
         return int(h * 0.62)
 
     profile = np.mean(np.abs(np.diff(gray[y0:y1, x0:x1], axis=0)), axis=1)
-    profile = cv2.GaussianBlur(profile.reshape(-1, 1), (1,  nine := 9), 0).ravel()
+    profile = cv2.GaussianBlur(profile.reshape(-1, 1), (1, 9), 0).ravel()
     peak = int(np.argmax(profile)) + y0
 
-    # A boundary that is too high usually means a window/console edge won.
-    # Keep the floor conservative; false positives are much worse than leaving
-    # a small amount of floor unpainted.
+    # Keep the floor conservative: a false floor mask is much more damaging
+    # than leaving a small amount of floor unpainted.
     return int(np.clip(peak + max(4, int(h * 0.012)), h * 0.50, h * 0.76))
 
 
 def estimate_floor_mask(image: np.ndarray) -> np.ndarray:
-    """Estimate only the visible floor, with an explicit geometric prior.
-
-    The previous implementation selected the largest colour-similar region
-    from the bottom seed. In a real room this can connect the floor to walls,
-    windows and furniture. The new mask is constrained below the estimated
-    wall/floor boundary and must remain connected to the bottom of the frame.
-    """
+    """Estimate only the visible floor, with an explicit geometric prior."""
     h, w = image.shape[:2]
     if h < 20 or w < 20:
         return np.zeros((h, w), dtype=np.uint8)
 
     boundary = _estimate_floor_boundary(image)
-
     lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB).astype(np.float32)
     y0 = max(boundary, int(h * 0.58))
     x0, x1 = int(w * 0.20), int(w * 0.80)
@@ -62,15 +45,13 @@ def estimate_floor_mask(image: np.ndarray) -> np.ndarray:
     seed_median = np.median(seed.reshape(-1, 3), axis=0)
     dist = np.linalg.norm(lab - seed_median, axis=2)
     seed_dist = dist[int(h * 0.90) :, x0:x1]
-
-    # Adaptive but deliberately conservative. A fixed lower bound prevents
-    # broad wall colours from becoming floor just because the floor is bright.
     threshold = max(10.0, float(np.percentile(seed_dist, 90) * 2.0))
+
     candidate = (dist <= threshold).astype(np.uint8) * 255
     candidate[:y0, :] = 0
 
-    # Only retain regions that touch the bottom edge. This prevents windows and
-    # wall patches below the boundary from becoming disconnected floor islands.
+    # Retain only regions connected to the bottom edge. This prevents walls,
+    # windows and disconnected furniture patches from becoming floor islands.
     bottom = np.zeros_like(candidate)
     bottom[h - 2 : h, :] = candidate[h - 2 : h, :]
     reachable = cv2.dilate(bottom, np.ones((9, 9), np.uint8), iterations=1)
@@ -82,12 +63,9 @@ def estimate_floor_mask(image: np.ndarray) -> np.ndarray:
         reachable = expanded
     mask = reachable
 
-    # Fill small holes caused by furniture legs/shadows, but never cross the
-    # geometric floor boundary.
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
     mask[:y0, :] = 0
-
     mask = _carve_high_texture(mask, image)
     mask[:y0, :] = 0
     return mask.astype(np.uint8)
@@ -106,7 +84,6 @@ def _carve_high_texture(mask: np.ndarray, image: np.ndarray) -> np.ndarray:
     floor_median = float(np.median(local_std[mask > 0]))
     carve_threshold = max(14.0, floor_median * 5.0)
     interior = cv2.erode(mask, np.ones((15, 15), np.uint8))
-
     carved = mask.copy()
     carved[(local_std > carve_threshold) & (interior > 0)] = 0
     return _largest_component(carved)
@@ -116,7 +93,6 @@ def _largest_component(mask: np.ndarray) -> np.ndarray:
     count, labels, stats, _ = cv2.connectedComponentsWithStats(mask)
     if count <= 1:
         return mask
-
     largest = 1
     largest_area = stats[1, cv2.CC_STAT_AREA]
     for i in range(2, count):
@@ -124,7 +100,6 @@ def _largest_component(mask: np.ndarray) -> np.ndarray:
         if area > largest_area:
             largest = i
             largest_area = area
-
     result = np.zeros(mask.shape, dtype=np.uint8)
     result[labels == largest] = 255
     return result
