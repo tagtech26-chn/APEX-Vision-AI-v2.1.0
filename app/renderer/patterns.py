@@ -7,14 +7,10 @@ import numpy as np
 
 
 class TilePatterns:
-    """Builds large canvases repeating a tile in a given pattern."""
+    """Build tile patterns in the same coordinate plane as the homography."""
 
-    def __init__(self, default_canvas: int = 4096) -> None:
-        self.default_canvas = default_canvas
-
-    # ---------------------------------------------------------
-    # Public API
-    # ---------------------------------------------------------
+    def __init__(self, default_canvas: int = 2048) -> None:
+        self.default_canvas = int(max(512, default_canvas))
 
     def create(self, tile: np.ndarray, pattern: str) -> np.ndarray:
         pattern = (pattern or "Straight").strip().lower()
@@ -27,20 +23,13 @@ class TilePatterns:
             return self.create_chevron_canvas(tile)
         return self.create_straight_canvas(tile)
 
-    # ---------------------------------------------------------
-    # Canvas size
-    # ---------------------------------------------------------
-
     def _canvas_size(self, tile: np.ndarray) -> int:
         tile_h, tile_w = tile.shape[:2]
-        size = max(self.default_canvas, max(tile_h, tile_w) * 24)
-        # The floor quad maps to a ~2048px plane; anything beyond 4096 is
-        # wasted memory and build time (a 12960px canvas is ~10x slower).
-        return int(min(size, 4096))
-
-    # ---------------------------------------------------------
-    # Straight
-    # ---------------------------------------------------------
+        # The V2.2 homography maps the floor to 2048x2048. Do not generate a
+        # larger unrelated texture plane because inverse warping would change
+        # scale and origin while adding CPU/memory cost.
+        size = max(self.default_canvas, max(tile_h, tile_w) * 12)
+        return int(min(size, self.default_canvas))
 
     def create_straight_canvas(self, tile: np.ndarray) -> np.ndarray:
         tile_h, tile_w = tile.shape[:2]
@@ -52,12 +41,7 @@ class TilePatterns:
                 y2 = min(y + tile_h, canvas_size)
                 x2 = min(x + tile_w, canvas_size)
                 canvas[y:y2, x:x2] = tile[: y2 - y, : x2 - x]
-
         return canvas
-
-    # ---------------------------------------------------------
-    # Brick
-    # ---------------------------------------------------------
 
     def create_brick_canvas(self, tile: np.ndarray) -> np.ndarray:
         tile_h, tile_w = tile.shape[:2]
@@ -75,16 +59,11 @@ class TilePatterns:
                 src_x = max(0, -x)
                 canvas[y1:y2, x1:x2] = tile[: y2 - y1, src_x : src_x + (x2 - x1)]
             row += 1
-
         return canvas
-
-    # ---------------------------------------------------------
-    # Plank helpers (for herringbone / chevron)
-    # ---------------------------------------------------------
 
     @staticmethod
     def _plank(tile: np.ndarray, ratio: float = 2.0) -> np.ndarray:
-        """Return a rectangular plank (length x width) derived from the tile."""
+        """Return a rectangular plank derived from the tile texture."""
         h, w = tile.shape[:2]
         length = int(round(w * ratio))
         return cv2.resize(tile, (length, h), interpolation=cv2.INTER_CUBIC)
@@ -100,17 +79,15 @@ class TilePatterns:
         matrix[0, 2] += nw / 2 - w / 2
         matrix[1, 2] += nh / 2 - h / 2
         return cv2.warpAffine(
-            img, matrix, (nw, nh), flags=cv2.INTER_CUBIC, borderValue=(0, 0, 0)
+            img,
+            matrix,
+            (nw, nh),
+            flags=cv2.INTER_CUBIC,
+            borderValue=(0, 0, 0),
         )
 
     @staticmethod
     def _rotated_with_mask(img: np.ndarray, angle: float):
-        """Rotate and return (image, mask) covering only the rotated content.
-
-        warpAffine fills the bounding-box corners black; the mask lets the
-        pasting step skip those pixels so overlapping planks never paint black
-        over each other.
-        """
         h, w = img.shape[:2]
         matrix = cv2.getRotationMatrix2D((w / 2, h / 2), angle, 1.0)
         cos = abs(matrix[0, 0])
@@ -120,11 +97,19 @@ class TilePatterns:
         matrix[0, 2] += nw / 2 - w / 2
         matrix[1, 2] += nh / 2 - h / 2
         rotated = cv2.warpAffine(
-            img, matrix, (nw, nh), flags=cv2.INTER_CUBIC, borderValue=(0, 0, 0)
+            img,
+            matrix,
+            (nw, nh),
+            flags=cv2.INTER_CUBIC,
+            borderValue=(0, 0, 0),
         )
         ones = np.full((h, w), 255, dtype=np.uint8)
         mask = cv2.warpAffine(
-            ones, matrix, (nw, nh), flags=cv2.INTER_NEAREST, borderValue=0
+            ones,
+            matrix,
+            (nw, nh),
+            flags=cv2.INTER_NEAREST,
+            borderValue=0,
         )
         return rotated, mask
 
@@ -145,7 +130,6 @@ class TilePatterns:
 
         dx1, dy1 = max(-x1, 0), max(-y1, 0)
         dx2, dy2 = max(x2 - canvas_w, 0), max(y2 - canvas_h, 0)
-
         if dx1 >= w or dy1 >= h or dx2 >= w or dy2 >= h:
             return
 
@@ -153,7 +137,6 @@ class TilePatterns:
         sx2, sy2 = w - dx2, h - dy2
         cx1, cy1 = max(x1, 0), max(y1, 0)
         cx2, cy2 = min(x2, canvas_w), min(y2, canvas_h)
-
         if cx1 >= cx2 or cy1 >= cy2 or sx1 >= sx2 or sy1 >= sy2:
             return
 
@@ -161,19 +144,11 @@ class TilePatterns:
         src = img[sy1:sy2, sx1:sx2]
         if mask is None:
             roi[...] = src
-            return
-        cv2.copyTo(src, mask[sy1:sy2, sx1:sx2], roi)
+        else:
+            cv2.copyTo(src, mask[sy1:sy2, sx1:sx2], roi)
 
-    def _zigzag_canvas(
-        self,
-        tile: np.ndarray,
-        checker: bool,
-    ) -> np.ndarray:
-        """Draw planks at +/-45 degrees.
-
-        checker=True  -> herringbone (interlocked fishbone)
-        checker=False -> chevron (aligned zigzag)
-        """
+    def _zigzag_canvas(self, tile: np.ndarray, checker: bool) -> np.ndarray:
+        """Draw planks at +/-45 degrees without black rotation corners."""
         plank = self._plank(tile, ratio=2.0)
         rotated_neg, mask_neg = self._rotated_with_mask(plank, -45)
         rotated_pos, mask_pos = self._rotated_with_mask(plank, 45)
@@ -182,11 +157,8 @@ class TilePatterns:
         canvas_size = self._canvas_size(tile)
         canvas = np.zeros((canvas_size, canvas_size, 3), dtype=np.uint8)
 
-        # A plank rotated by 45 deg is a tilted rectangle inside its bounding
-        # box, so only ~half the box is opaque. Spacing cells by the full box
-        # leaves black gaps that get projected onto the floor; stepping by a
-        # third and masking the pastes (never writing the black corners) makes
-        # the planks overlap into full coverage with zero gaps.
+        # Overlap the rotated bounding boxes so their transparent corners do
+        # not become uncovered black regions after perspective projection.
         step = max(1, cell // 3)
         cols = int(np.ceil(canvas_size / step)) + 2
         rows = int(np.ceil(canvas_size / step)) + 2
