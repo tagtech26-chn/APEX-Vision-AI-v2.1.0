@@ -13,13 +13,19 @@ from app.renderer.projection_scale import evaluate_projection_scale
 
 
 class TileProjector:
-    """Wrap a physically scaled tile pattern into the room perspective."""
+    """Project a physically scaled tile pattern into the detected floor plane.
 
-    PLANE_SPAN_PIXELS = 4096
+    The scene homography maps the detected floor quad to a 2048x2048 top-down
+    proxy plane. The texture canvas therefore uses the exact same coordinate
+    system; using a larger unrelated canvas changes apparent tile scale and
+    the pattern origin after inverse warping.
+    """
+
+    PLANE_SPAN_PIXELS = 2048
     REFERENCE_FLOOR_MM = 7800
 
     def __init__(self, debug: bool = False) -> None:
-        self.patterns = TilePatterns()
+        self.patterns = TilePatterns(default_canvas=self.PLANE_SPAN_PIXELS)
         self.grout = GroutEngine()
         self.feather = MaskFeather()
         self.debug = debug
@@ -48,11 +54,11 @@ class TileProjector:
         return cv2.addWeighted(tile, 1.12, blur, -0.12, 0)
 
     def _tile_pixels(self, tile_size_mm: int) -> int:
-        """Return projected tile size in the fixed physical floor canvas."""
+        """Return tile size in the same 2048px coordinate system as homography."""
         size = max(100, int(tile_size_mm))
         tiles_across = int(round(self.REFERENCE_FLOOR_MM / size))
         tiles_across = max(3, min(tiles_across, 40))
-        return max(64, self.PLANE_SPAN_PIXELS // tiles_across)
+        return max(48, self.PLANE_SPAN_PIXELS // tiles_across)
 
     @staticmethod
     def _plane_shift(
@@ -74,9 +80,9 @@ class TileProjector:
         valid = np.abs(denominator) > 1e-10
         if not np.any(valid):
             return 0.0, 0.0
+
         px = plane[valid, 0] / denominator[valid]
         py = plane[valid, 1] / denominator[valid]
-
         cx = 0.5 * (float(px.min()) + float(px.max()))
         cy = 0.5 * (float(py.min()) + float(py.max()))
         sx = canvas_size / 2.0 - cx
@@ -89,8 +95,12 @@ class TileProjector:
         return sx, sy
 
     @staticmethod
-    def _grout_tile_mask(tile_pixels: int, tile_size_mm: int, grout_width_mm: int) -> np.ndarray:
-        """Create a binary grout mask aligned with the physical tile dimensions."""
+    def _grout_tile_mask(
+        tile_pixels: int,
+        tile_size_mm: int,
+        grout_width_mm: int,
+    ) -> np.ndarray:
+        """Create a binary grout mask aligned with physical tile dimensions."""
         mask = np.zeros((tile_pixels, tile_pixels, 3), dtype=np.uint8)
         thickness = GroutEngine._thickness_pixels(tile_pixels, tile_size_mm, grout_width_mm)
         if thickness <= 0:
@@ -135,10 +145,10 @@ class TileProjector:
             grout_color=grout_color,
             tile_size_mm=tile_size_mm,
         )
-        canvas = self.patterns.create(tile, pattern)
 
-        # Build a parallel seam mask from the same pattern generator. This
-        # prevents lighting/color matching from washing out grout joints.
+        # Homography destination is 2048x2048. Keep the generated pattern in
+        # that exact plane so physical scale and perspective remain consistent.
+        canvas = self.patterns.create(tile, pattern)
         grout_tile = self._grout_tile_mask(tile_pixels, tile_size_mm, grout_width)
         grout_canvas = self.patterns.create(grout_tile, pattern)
 
@@ -148,9 +158,12 @@ class TileProjector:
             transform = homography
 
         if floor_mask is not None:
-            sx, sy = self._plane_shift(homography, floor_mask, canvas.shape[0])
+            sx, sy = self._plane_shift(homography, floor_mask, self.PLANE_SPAN_PIXELS)
             if sx or sy:
-                shift = np.array([[1, 0, -sx], [0, 1, -sy], [0, 0, 1]], dtype=np.float64)
+                shift = np.array(
+                    [[1, 0, -sx], [0, 1, -sy], [0, 0, 1]],
+                    dtype=np.float64,
+                )
                 transform = transform @ shift
 
         warped = cv2.warpPerspective(
@@ -170,8 +183,6 @@ class TileProjector:
             borderValue=(0, 0, 0),
         )
 
-        # Explicitly track valid warped texture coverage. BORDER_CONSTANT
-        # pixels must never become synthetic black tile in the floor blend.
         source_coverage = np.full(canvas.shape[:2], 255, dtype=np.uint8)
         warped_coverage = cv2.warpPerspective(
             source_coverage,
@@ -204,9 +215,7 @@ class TileProjector:
         """Blend the projection over the floor while preserving foreground objects."""
         mask = self.feather.feather(floor_mask, radius=17).astype(np.float32)
         if self.last_projection_mask is not None:
-            coverage = cv2.GaussianBlur(
-                self.last_projection_mask.astype(np.float32), (0, 0), 1.2
-            )
+            coverage = cv2.GaussianBlur(self.last_projection_mask.astype(np.float32), (0, 0), 1.2)
             mask *= np.clip(coverage, 0.0, 1.0)
 
         self.last_occlusion_diagnostics = OcclusionMask.leakage_diagnostics(mask, occlusion_mask)
