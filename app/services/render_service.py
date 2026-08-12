@@ -25,6 +25,7 @@ _ANALYZER_LOCK = threading.Lock()
 _TILE_CACHE_LOCK = threading.Lock()
 _TILE_CACHE: OrderedDict[str, object] = OrderedDict()
 _QUALITY_EVALUATOR = SceneQualityEvaluator()
+_SCENE_PIPELINE_VERSION = "v22-geometry-safe-3"
 
 
 class RenderService:
@@ -194,8 +195,13 @@ class RenderService:
         return str(output_file)
 
     def _cache_key(self, room_path: Path) -> str:
-        provider = self.get_analyzer().providers["detector"]
-        return f"{room_path.stem}__{provider}__v7"
+        analyzer = self.get_analyzer()
+        providers = analyzer.providers
+        pipeline = "v22" if analyzer.__class__.__name__ == "V22SceneAnalyzer" else "v6"
+        return (
+            f"{room_path.stem}__{pipeline}__{_SCENE_PIPELINE_VERSION}__"
+            f"{providers['detector']}__{providers['segmenter']}__{providers['depth']}"
+        )
 
     @staticmethod
     def _source_fingerprint(room_path: Path) -> str:
@@ -213,14 +219,15 @@ class RenderService:
             try:
                 scene = self.cache.load(room_key)
                 cached_fp = scene.metadata.get("source_fingerprint")
-                if cached_fp == fingerprint:
+                cached_pipeline = scene.metadata.get("v22_geometry", {}).get("version")
+                if pipeline_is_compatible(cached_pipeline, _SCENE_PIPELINE_VERSION) and cached_fp == fingerprint:
                     render_metrics.cache_hit()
                     logger.info("[CACHE] Hit: %s", room_key)
                     if progress_cb is not None:
                         progress_cb(0.1, "Loading cached scene...")
                     return scene
                 render_metrics.cache_miss()
-                logger.info("[CACHE] Source changed for %s, re-analysing", room_path.name)
+                logger.info("[CACHE] Scene pipeline/source changed for %s, re-analysing", room_path.name)
             except (OSError, TypeError, ValueError, EOFError, pickle.UnpicklingError) as exc:
                 render_metrics.cache_error()
                 render_metrics.cache_miss()
@@ -232,5 +239,14 @@ class RenderService:
         analyzer = self.get_analyzer()
         scene = analyzer.analyze(room_path, progress_cb=progress_cb)
         scene.metadata["source_fingerprint"] = fingerprint
+        scene.metadata["scene_pipeline_version"] = _SCENE_PIPELINE_VERSION
         self.cache.save(room_key, scene)
         return scene
+
+
+def pipeline_is_compatible(cached_pipeline: object, current_pipeline: str) -> bool:
+    if cached_pipeline is None:
+        return False
+    return str(cached_pipeline) == current_pipeline or (
+        current_pipeline == "v22-geometry-safe-3" and str(cached_pipeline) == "2.2-geometry-safe-2"
+    )
