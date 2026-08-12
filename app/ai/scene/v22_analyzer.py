@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 
 import cv2
 import numpy as np
@@ -14,11 +15,11 @@ logger = logging.getLogger("apex.ai")
 
 
 class V22SceneAnalyzer(SceneAnalyzer):
-    """Refine the existing Heavy-AI scene with metric floor geometry.
+    """Refine the existing scene with metric geometry and optional Gemini spatial guidance.
 
-    Metric depth and normals are geometric evidence only. They never create
-    floor pixels outside the semantic floor segmentation, preventing walls,
-    cabinets and furniture from becoming synthetic floor regions.
+    Gemini is used only as a high-level spatial advisor. Deterministic OpenCV
+    geometry remains authoritative, and every Gemini floor quad is validated
+    against the local semantic floor mask before it can affect rendering.
     """
 
     def __init__(self, detector, segmenter, depth) -> None:
@@ -58,6 +59,113 @@ class V22SceneAnalyzer(SceneAnalyzer):
             result = V22SceneAnalyzer._largest_component(result)
         return result
 
+    @staticmethod
+    def _apply_gemini_floor_quad(scene, image_path, protected_mask):
+        """Use Gemini's spatial floor quad only after deterministic validation."""
+        enabled = os.getenv("APEX_V22_GEOMETRY_ADVISOR", "off").strip().lower()
+        if enabled not in {"gemini", "google", "gemini_er"}:
+            scene.metadata["spatial_advisor"] = {"provider": "disabled", "accepted": False}
+            return scene
+
+        try:
+            from app.ai.geometry.gemini_spatial import GeminiSpatialAdvisor
+
+            advisor = GeminiSpatialAdvisor()
+            if not advisor.available:
+                scene.metadata["spatial_advisor"] = {
+                    "provider": advisor.name,
+                    "accepted": False,
+                    "reason": "GEMINI_API_KEY or google-genai is not configured",
+                }
+                return scene
+
+            result = advisor.analyze(image_path)
+            h, w = scene.height, scene.width
+            quad = np.asarray(result["floor_quad"], dtype=np.float32)
+            quad[:, 0] *= float(w - 1)
+            quad[:, 1] *= float(h - 1)
+
+            quad_mask = np.zeros((h, w), dtype=np.uint8)
+            cv2.fillConvexPoly(quad_mask, np.round(quad).astype(np.int32), 255)
+            semantic = scene.floor_mask > 0
+            proposed = quad_mask > 0
+            intersection = int((semantic & proposed).sum())
+            semantic_area = int(semantic.sum())
+            quad_area = int(proposed.sum())
+            coverage = intersection / max(quad_area, 1)
+            semantic_capture = intersection / max(semantic_area, 1)
+
+            # Gemini may see the whole floor but must still agree with local
+            # segmentation. These thresholds prevent hallucinated walls/ceiling.
+            accepted = (
+                coverage >= 0.55
+                and semantic_capture >= 0.15
+                and quad_area >= max(1000, int(h * w * 0.04))
+            )
+            if not accepted:
+                scene.metadata["spatial_advisor"] = {
+                    "provider": advisor.name,
+                    "accepted": False,
+                    "confidence": result["confidence"],
+                    "semantic_overlap": coverage,
+                    "semantic_capture": semantic_capture,
+                    "reason": "quad rejected by local semantic-mask guardrails",
+                }
+                logger.warning(
+                    "[V2.2] Gemini floor quad rejected: overlap=%.3f capture=%.3f confidence=%.3f",
+                    coverage,
+                    semantic_capture,
+                    result["confidence"],
+                )
+                return scene
+
+            fused = quad_mask
+            if protected_mask is not None and (protected_mask > 0).any():
+                fused = cv2.subtract(fused, protected_mask.astype(np.uint8))
+            fused = V22SceneAnalyzer._largest_component(fused)
+            polygon = V22SceneAnalyzer._quad_to_polygon(quad)
+            homography = scene.homography
+            try:
+                homography_result = scene_analyzer_homography(scene, polygon)
+                homography = homography_result.matrix
+            except Exception as exc:
+                logger.warning("[V2.2] Gemini homography recompute failed; keeping local homography: %s", exc)
+
+            scene.floor_mask = fused
+            scene.floor_polygon = polygon
+            scene.homography = homography
+            scene.metadata["spatial_advisor"] = {
+                "provider": advisor.name,
+                "model": advisor.model,
+                "accepted": True,
+                "confidence": result["confidence"],
+                "semantic_overlap": coverage,
+                "semantic_capture": semantic_capture,
+                "notes": result.get("notes", ""),
+            }
+            logger.info(
+                "[V2.2] Gemini spatial floor quad accepted confidence=%.3f overlap=%.3f capture=%.3f",
+                result["confidence"],
+                coverage,
+                semantic_capture,
+            )
+        except Exception as exc:
+            logger.warning("[V2.2] Gemini spatial advisor unavailable; keeping local geometry: %s", exc)
+            scene.metadata["spatial_advisor"] = {
+                "provider": "gemini_robotics_er_1.6",
+                "accepted": False,
+                "reason": str(exc),
+            }
+        return scene
+
+    @staticmethod
+    def _quad_to_polygon(quad: np.ndarray) -> np.ndarray:
+        """Return a stable float32 quadrilateral for the existing polygon engine."""
+        from app.ai.geometry.polygon import PolygonEngine
+
+        ordered = PolygonEngine.order_points(quad.astype(np.float32))
+        return ordered.astype(np.float32)
+
     def analyze(self, image_path, progress_cb=None):
         scene = super().analyze(image_path, progress_cb=progress_cb)
         metric_depth = getattr(self.depth, "last_metric_depth", None)
@@ -87,8 +195,6 @@ class V22SceneAnalyzer(SceneAnalyzer):
         refined = self._refine_floor_mask(scene.floor_mask, residual, normals, threshold)
         refined_area = int((refined > 0).sum())
 
-        # Guardrail only: preserve Heavy-AI semantic segmentation if geometric
-        # refinement collapses the floor to an unusably small region.
         if original_area >= 500 and refined_area < max(250, int(original_area * 0.12)):
             logger.warning("[V2.2] Metric refinement rejected: area collapsed %d -> %d pixels.", original_area, refined_area)
             refined = scene.floor_mask.copy()
@@ -116,4 +222,14 @@ class V22SceneAnalyzer(SceneAnalyzer):
             "refined_area_ratio": (refined_area / original_area) if original_area else 0.0,
             "bottom_edge_forced": False,
         }
-        return scene
+
+        # Run the remote spatial advisor last so it can improve the floor quad
+        # without becoming a dependency of the local CPU validation path.
+        return self._apply_gemini_floor_quad(scene, image_path, scene.protected_object_mask)
+
+
+def scene_analyzer_homography(scene, polygon):
+    """Compute homography using the same engine already owned by SceneAnalyzer."""
+    from app.ai.geometry.homography import HomographyEngine
+
+    return HomographyEngine().compute(polygon)
