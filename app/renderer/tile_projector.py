@@ -5,7 +5,6 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-from app.ai.scene.result import SceneResult
 from app.renderer.grout_engine import GroutEngine
 from app.renderer.mask_feather import MaskFeather
 from app.renderer.occlusion import OcclusionMask
@@ -27,6 +26,7 @@ class TileProjector:
         self.last_scale_diagnostics: dict[str, float | int] | None = None
         self.last_occlusion_diagnostics: dict[str, float | int | bool] | None = None
         self.last_grout_mask: np.ndarray | None = None
+        self.last_projection_mask: np.ndarray | None = None
 
     @staticmethod
     def _to_square(tile: np.ndarray) -> np.ndarray:
@@ -169,12 +169,26 @@ class TileProjector:
             borderMode=cv2.BORDER_CONSTANT,
             borderValue=(0, 0, 0),
         )
+
+        # Explicitly track valid warped texture coverage. BORDER_CONSTANT
+        # pixels must never become synthetic black tile in the floor blend.
+        source_coverage = np.full(canvas.shape[:2], 255, dtype=np.uint8)
+        warped_coverage = cv2.warpPerspective(
+            source_coverage,
+            transform,
+            (width, height),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
+        self.last_projection_mask = (warped_coverage >= 200).astype(np.uint8)
         self.last_grout_mask = (warped_grout[:, :, 0] > 80).astype(np.uint8)
 
         if self.debug:
             cv2.imwrite("output/debug_tile.png", tile)
             cv2.imwrite("output/debug_canvas.png", canvas)
             cv2.imwrite("output/debug_grout_mask.png", self.last_grout_mask * 255)
+            cv2.imwrite("output/debug_projection_mask.png", self.last_projection_mask * 255)
             cv2.imwrite("output/debug_projection.png", warped)
 
         return warped
@@ -188,7 +202,13 @@ class TileProjector:
         occlusion_mask: np.ndarray | None = None,
     ) -> np.ndarray:
         """Blend the projection over the floor while preserving foreground objects."""
-        mask = self.feather.feather(floor_mask, radius=17)
+        mask = self.feather.feather(floor_mask, radius=17).astype(np.float32)
+        if self.last_projection_mask is not None:
+            coverage = cv2.GaussianBlur(
+                self.last_projection_mask.astype(np.float32), (0, 0), 1.2
+            )
+            mask *= np.clip(coverage, 0.0, 1.0)
+
         self.last_occlusion_diagnostics = OcclusionMask.leakage_diagnostics(mask, occlusion_mask)
         mask = OcclusionMask.apply(mask, occlusion_mask)[..., None]
 
