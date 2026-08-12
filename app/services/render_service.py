@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import pickle
 import threading
 import time
@@ -25,7 +26,7 @@ _ANALYZER_LOCK = threading.Lock()
 _TILE_CACHE_LOCK = threading.Lock()
 _TILE_CACHE: OrderedDict[str, object] = OrderedDict()
 _QUALITY_EVALUATOR = SceneQualityEvaluator()
-_SCENE_PIPELINE_VERSION = "v22-geometry-safe-4"
+_SCENE_PIPELINE_VERSION = "v22-geometry-safe-5"
 
 
 class RenderService:
@@ -73,24 +74,11 @@ class RenderService:
                     _TILE_CACHE.popitem(last=False)
         return tile
 
-    def render(
-        self,
-        room_path: str | Path,
-        tile_path: str | Path,
-        tile_size_mm: int = 600,
-        grout_width: int = 2,
-        grout_color=(220, 220, 220),
-        pattern: str = "Straight",
-        material_profile: str = "auto",
-        alpha: float = 0.92,
-        smart_removal: bool = True,
-        furniture_shadow: bool = True,
-        enhance_lighting: bool = True,
-        surface: str = "Floor",
-        environment: str = "Interior",
-        visualization_mode: str = "Realistic",
-        progress_cb=None,
-    ) -> str:
+    def render(self, room_path: str | Path, tile_path: str | Path, tile_size_mm: int = 600, grout_width: int = 2,
+               grout_color=(220, 220, 220), pattern: str = "Straight", material_profile: str = "auto",
+               alpha: float = 0.92, smart_removal: bool = True, furniture_shadow: bool = True,
+               enhance_lighting: bool = True, surface: str = "Floor", environment: str = "Interior",
+               visualization_mode: str = "Realistic", progress_cb=None) -> str:
         started = time.perf_counter()
         room_path = Path(room_path)
         tile_path = Path(tile_path)
@@ -114,72 +102,42 @@ class RenderService:
         geometry_quality = evaluate_floor_geometry(scene.floor_mask, scene.floor_polygon, scene.homography)
         scene.metadata["geometry_quality"] = geometry_quality.as_dict()
         render_metrics.stage("quality", time.perf_counter() - quality_started)
-        logger.info(
-            "[AI] Scene quality score=%.2f grade=%s floor_coverage=%.4f depth_valid=%.4f geometry_score=%.4f perspective=%.4f",
-            quality["score"], quality["grade"], quality["floor_coverage"], quality["depth_valid_ratio"],
-            geometry_quality.score, geometry_quality.perspective_score,
-        )
+        logger.info("[AI] Scene quality score=%.2f grade=%s floor_coverage=%.4f depth_valid=%.4f geometry_score=%.4f perspective=%.4f",
+                    quality["score"], quality["grade"], quality["floor_coverage"], quality["depth_valid_ratio"],
+                    geometry_quality.score, geometry_quality.perspective_score)
 
         tile_started = time.perf_counter()
         tile = self._load_tile(tile_path)
         render_metrics.stage("tile_load", time.perf_counter() - tile_started)
 
         resolved_profile = material_profile
-        material_intelligence: dict[str, object]
         if material_profile == "auto":
             classify_started = time.perf_counter()
             material_intelligence = classify_surface(tile)
             resolved_profile = str(material_intelligence["material"])
             scene.metadata["material_classification"] = material_intelligence
             render_metrics.stage("material_classification", time.perf_counter() - classify_started)
-            logger.info(
-                "[AI] Material baseline profile=%s finish=%s confidence=%.4f scale_factor=%.4f",
-                resolved_profile,
-                material_intelligence["finish"],
-                material_intelligence["confidence"],
-                material_intelligence["texture_scale_factor"],
-            )
+            logger.info("[AI] Material baseline profile=%s finish=%s confidence=%.4f scale_factor=%.4f",
+                        resolved_profile, material_intelligence["finish"], material_intelligence["confidence"],
+                        material_intelligence["texture_scale_factor"])
         else:
-            material_intelligence = {
-                "material": resolved_profile,
-                "finish": "satin",
-                "confidence": 1.0,
-                "texture_scale_factor": 1.0,
-                "method": "explicit-profile",
-            }
+            material_intelligence = {"material": resolved_profile, "finish": "satin", "confidence": 1.0,
+                                     "texture_scale_factor": 1.0, "method": "explicit-profile"}
             scene.metadata["material_classification"] = material_intelligence
 
-        scene.metadata["visualizer_options"] = {
-            "smart_removal": smart_removal,
-            "furniture_shadow": furniture_shadow,
-            "enhance_lighting": enhance_lighting,
-            "surface": surface,
-            "environment": environment,
-            "visualization_mode": visualization_mode,
-        }
-
+        scene.metadata["visualizer_options"] = {"smart_removal": smart_removal, "furniture_shadow": furniture_shadow,
+                                                  "enhance_lighting": enhance_lighting, "surface": surface,
+                                                  "environment": environment, "visualization_mode": visualization_mode}
         report(0.92, "Rendering tiles...")
-        logger.info(
-            "Rendering room=%s tile=%s size=%smm grout=%s pattern=%s material=%s finish=%s lighting=%s shadow=%s removal=%s",
-            room_key, tile_path.name, tile_size_mm, grout_width, pattern, resolved_profile, material_intelligence["finish"],
-            enhance_lighting, furniture_shadow, smart_removal,
-        )
+        logger.info("Rendering room=%s tile=%s size=%smm grout=%s pattern=%s material=%s finish=%s lighting=%s shadow=%s removal=%s",
+                    room_key, tile_path.name, tile_size_mm, grout_width, pattern, resolved_profile,
+                    material_intelligence["finish"], enhance_lighting, furniture_shadow, smart_removal)
         render_started = time.perf_counter()
-        result = self.renderer.render(
-            scene=scene,
-            tile=tile,
-            tile_size_mm=tile_size_mm,
-            grout_width=grout_width,
-            grout_color=grout_color,
-            pattern=pattern,
-            alpha=alpha,
-            material_profile=resolved_profile,
-            material_intelligence=material_intelligence,
-            smart_removal=smart_removal,
-            furniture_shadow=furniture_shadow,
-            enhance_lighting=enhance_lighting,
-            visualization_mode=visualization_mode,
-        )
+        result = self.renderer.render(scene=scene, tile=tile, tile_size_mm=tile_size_mm, grout_width=grout_width,
+                                      grout_color=grout_color, pattern=pattern, alpha=alpha,
+                                      material_profile=resolved_profile, material_intelligence=material_intelligence,
+                                      smart_removal=smart_removal, furniture_shadow=furniture_shadow,
+                                      enhance_lighting=enhance_lighting, visualization_mode=visualization_mode)
         render_metrics.stage("render", time.perf_counter() - render_started)
 
         report(0.97, "Writing image...")
@@ -198,10 +156,9 @@ class RenderService:
         analyzer = self.get_analyzer()
         providers = analyzer.providers
         pipeline = "v22" if analyzer.__class__.__name__ == "V22SceneAnalyzer" else "v6"
-        return (
-            f"{room_path.stem}__{pipeline}__{_SCENE_PIPELINE_VERSION}__"
-            f"{providers['detector']}__{providers['segmenter']}__{providers['depth']}"
-        )
+        geometry_advisor = os.getenv("APEX_V22_GEOMETRY_ADVISOR", "off").strip().lower() if pipeline == "v22" else "off"
+        return (f"{room_path.stem}__{pipeline}__{_SCENE_PIPELINE_VERSION}__"
+                f"{providers['detector']}__{providers['segmenter']}__{providers['depth']}__advisor-{geometry_advisor}")
 
     @staticmethod
     def _source_fingerprint(room_path: Path) -> str:
@@ -211,7 +168,6 @@ class RenderService:
     def _load_or_build_scene(self, room_path: Path, progress_cb=None) -> SceneResult:
         room_key = self._cache_key(room_path)
         fingerprint = self._source_fingerprint(room_path)
-
         if not self.cache.enabled:
             render_metrics.cache_miss()
             logger.warning("[CACHE] Disabled: APEX_CACHE_SIGNING_KEY is not configured")
@@ -221,10 +177,8 @@ class RenderService:
                 cached_fp = scene.metadata.get("source_fingerprint")
                 cached_pipeline = scene.metadata.get("scene_pipeline_version")
                 cached_geometry_version = scene.metadata.get("v22_geometry", {}).get("version")
-                compatible = (
-                    cached_pipeline == _SCENE_PIPELINE_VERSION
-                    and (cached_geometry_version is None or cached_geometry_version == "2.2-geometry-safe")
-                )
+                compatible = (cached_pipeline == _SCENE_PIPELINE_VERSION and
+                              (cached_geometry_version is None or cached_geometry_version == "2.2-geometry-safe"))
                 if compatible and cached_fp == fingerprint:
                     render_metrics.cache_hit()
                     logger.info("[CACHE] Hit: %s", room_key)
