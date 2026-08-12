@@ -95,7 +95,7 @@ uncertain, lower confidence rather than guessing.
             config=types.GenerateContentConfig(
                 temperature=0,
                 response_mime_type="application/json",
-                response_json_schema=self._schema(),
+                response_schema=self._schema(),
             ),
         )
         if not response.text:
