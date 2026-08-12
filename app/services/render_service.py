@@ -25,7 +25,7 @@ _ANALYZER_LOCK = threading.Lock()
 _TILE_CACHE_LOCK = threading.Lock()
 _TILE_CACHE: OrderedDict[str, object] = OrderedDict()
 _QUALITY_EVALUATOR = SceneQualityEvaluator()
-_SCENE_PIPELINE_VERSION = "v22-geometry-safe-3"
+_SCENE_PIPELINE_VERSION = "v22-geometry-safe-4"
 
 
 class RenderService:
@@ -219,8 +219,13 @@ class RenderService:
             try:
                 scene = self.cache.load(room_key)
                 cached_fp = scene.metadata.get("source_fingerprint")
-                cached_pipeline = scene.metadata.get("v22_geometry", {}).get("version")
-                if pipeline_is_compatible(cached_pipeline, _SCENE_PIPELINE_VERSION) and cached_fp == fingerprint:
+                cached_pipeline = scene.metadata.get("scene_pipeline_version")
+                cached_geometry_version = scene.metadata.get("v22_geometry", {}).get("version")
+                compatible = (
+                    cached_pipeline == _SCENE_PIPELINE_VERSION
+                    and (cached_geometry_version is None or cached_geometry_version == "2.2-geometry-safe")
+                )
+                if compatible and cached_fp == fingerprint:
                     render_metrics.cache_hit()
                     logger.info("[CACHE] Hit: %s", room_key)
                     if progress_cb is not None:
@@ -242,11 +247,3 @@ class RenderService:
         scene.metadata["scene_pipeline_version"] = _SCENE_PIPELINE_VERSION
         self.cache.save(room_key, scene)
         return scene
-
-
-def pipeline_is_compatible(cached_pipeline: object, current_pipeline: str) -> bool:
-    if cached_pipeline is None:
-        return False
-    return str(cached_pipeline) == current_pipeline or (
-        current_pipeline == "v22-geometry-safe-3" and str(cached_pipeline) == "2.2-geometry-safe-2"
-    )
