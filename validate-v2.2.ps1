@@ -39,22 +39,30 @@ $TestPath = Join-Path -Path $RepoRoot -ChildPath "tests\test_v22_metric_floor.py
 if ($LASTEXITCODE -ne 0) { throw "Metric floor regression failed." }
 
 Write-Host "[4/4] V2.2 CPU provider construction smoke" -ForegroundColor Cyan
-$cpuSmoke = @'
+$SmokePath = Join-Path -Path $env:TEMP -ChildPath "apex_v22_cpu_smoke.py"
+$SmokeCode = @'
 import os
 os.environ["APEX_V22_DEVICE"] = "cpu"
 from app.ai.scene.analyzer import build_scene_analyzer
+
 a = build_scene_analyzer("v22")
 print("provider=v22")
-print("detector=", a.detector.name)
-print("segmenter=", a.segmenter.name)
-print("depth=", a.depth.name)
+print("detector=" + a.detector.name)
+print("segmenter=" + a.segmenter.name)
+print("depth=" + a.depth.name)
 assert a.detector.name == "heuristic", a.detector.name
 assert a.segmenter.name == "heuristic", a.segmenter.name
 assert a.depth.name == "metric3d_v2", a.depth.name
 print("CPU provider construction=OK")
 '@
-& $Python -c $cpuSmoke
-if ($LASTEXITCODE -ne 0) { throw "v2.2 CPU provider construction validation failed." }
+Set-Content -LiteralPath $SmokePath -Value $SmokeCode -Encoding utf8
+try {
+    & $Python $SmokePath
+    if ($LASTEXITCODE -ne 0) { throw "v2.2 CPU provider construction validation failed." }
+}
+finally {
+    Remove-Item -LiteralPath $SmokePath -Force -ErrorAction SilentlyContinue
+}
 
 if ($SmokeModels) {
     Write-Host "[MODEL SMOKE] Loading the CUDA v2.2 stack. This may download several GB and requires the approved checkpoints." -ForegroundColor Yellow
