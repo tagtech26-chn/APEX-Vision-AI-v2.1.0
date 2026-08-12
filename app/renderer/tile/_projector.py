@@ -13,26 +13,24 @@ from app.renderer.projection_scale import evaluate_projection_scale
 
 
 class TileProjector:
-    """Project a physically scaled tile pattern into the detected floor plane.
+    """Wrap a physically scaled tile pattern into the room perspective.
 
-    The scene homography maps the detected floor quad to a 2048x2048 top-down
-    proxy plane. The texture canvas therefore uses the exact same coordinate
-    system; using a larger unrelated canvas changes apparent tile scale and
-    the pattern origin after inverse warping.
+    The scene homography maps the detected floor quad to a 2048x2048 proxy
+    plane. The texture canvas therefore uses that same coordinate space;
+    using a larger unrelated canvas silently changes apparent tile scale.
     """
 
     PLANE_SPAN_PIXELS = 2048
     REFERENCE_FLOOR_MM = 7800
 
     def __init__(self, debug: bool = False) -> None:
-        self.patterns = TilePatterns(default_canvas=self.PLANE_SPAN_PIXELS)
+        self.patterns = TilePatterns()
         self.grout = GroutEngine()
         self.feather = MaskFeather()
         self.debug = debug
         self.last_scale_diagnostics: dict[str, float | int] | None = None
         self.last_occlusion_diagnostics: dict[str, float | int | bool] | None = None
         self.last_grout_mask: np.ndarray | None = None
-        self.last_projection_mask: np.ndarray | None = None
 
     @staticmethod
     def _to_square(tile: np.ndarray) -> np.ndarray:
@@ -70,24 +68,23 @@ class TileProjector:
         rows, cols = np.where(floor_mask > 0)
         if rows.size == 0:
             return 0.0, 0.0
-
         stride = max(1, int(np.sqrt(rows.size / 10000)))
         rows = rows[::stride]
         cols = cols[::stride]
-        points = np.stack([cols, rows, np.ones_like(cols, dtype=np.float64)], axis=-1)
+        points = np.stack(
+            [cols, rows, np.ones_like(cols, dtype=np.float64)], axis=-1
+        )
         plane = points @ homography.T
         denominator = plane[:, 2]
         valid = np.abs(denominator) > 1e-10
         if not np.any(valid):
             return 0.0, 0.0
-
         px = plane[valid, 0] / denominator[valid]
         py = plane[valid, 1] / denominator[valid]
         cx = 0.5 * (float(px.min()) + float(px.max()))
         cy = 0.5 * (float(py.min()) + float(py.max()))
         sx = canvas_size / 2.0 - cx
         sy = canvas_size / 2.0 - cy
-
         span_x = float(px.max()) - float(px.min())
         span_y = float(py.max()) - float(py.min())
         if span_x > canvas_size or span_y > canvas_size:
@@ -102,15 +99,40 @@ class TileProjector:
     ) -> np.ndarray:
         """Create a binary grout mask aligned with physical tile dimensions."""
         mask = np.zeros((tile_pixels, tile_pixels, 3), dtype=np.uint8)
-        thickness = GroutEngine._thickness_pixels(tile_pixels, tile_size_mm, grout_width_mm)
+        thickness = GroutEngine._thickness_pixels(
+            tile_pixels, tile_size_mm, grout_width_mm
+        )
         if thickness <= 0:
             return mask
-
         thickness = min(thickness, max(1, tile_pixels // 8))
-        cv2.rectangle(mask, (0, 0), (tile_pixels - 1, thickness - 1), (255, 255, 255), -1)
-        cv2.rectangle(mask, (0, tile_pixels - thickness), (tile_pixels - 1, tile_pixels - 1), (255, 255, 255), -1)
-        cv2.rectangle(mask, (0, 0), (thickness - 1, tile_pixels - 1), (255, 255, 255), -1)
-        cv2.rectangle(mask, (tile_pixels - thickness, 0), (tile_pixels - 1, tile_pixels - 1), (255, 255, 255), -1)
+        cv2.rectangle(
+            mask,
+            (0, 0),
+            (tile_pixels - 1, thickness - 1),
+            (255, 255, 255),
+            -1,
+        )
+        cv2.rectangle(
+            mask,
+            (0, tile_pixels - thickness),
+            (tile_pixels - 1, tile_pixels - 1),
+            (255, 255, 255),
+            -1,
+        )
+        cv2.rectangle(
+            mask,
+            (0, 0),
+            (thickness - 1, tile_pixels - 1),
+            (255, 255, 255),
+            -1,
+        )
+        cv2.rectangle(
+            mask,
+            (tile_pixels - thickness, 0),
+            (tile_pixels - 1, tile_pixels - 1),
+            (255, 255, 255),
+            -1,
+        )
         return mask
 
     def project(
@@ -126,7 +148,6 @@ class TileProjector:
     ) -> np.ndarray:
         if homography is None:
             raise RuntimeError("Homography missing.")
-
         width, height = output_size
         tile_pixels = self._tile_pixels(tile_size_mm)
         self.last_scale_diagnostics = evaluate_projection_scale(
@@ -138,16 +159,15 @@ class TileProjector:
 
         tile = self._to_square(tile_image)
         tile = self._preserve_texture_detail(tile)
-        tile = cv2.resize(tile, (tile_pixels, tile_pixels), interpolation=cv2.INTER_LANCZOS4)
+        tile = cv2.resize(
+            tile, (tile_pixels, tile_pixels), interpolation=cv2.INTER_LANCZOS4
+        )
         tile = self.grout.apply(
             tile=tile,
             grout_width_mm=grout_width,
             grout_color=grout_color,
             tile_size_mm=tile_size_mm,
         )
-
-        # Homography destination is 2048x2048. Keep the generated pattern in
-        # that exact plane so physical scale and perspective remain consistent.
         canvas = self.patterns.create(tile, pattern)
         grout_tile = self._grout_tile_mask(tile_pixels, tile_size_mm, grout_width)
         grout_canvas = self.patterns.create(grout_tile, pattern)
@@ -158,11 +178,10 @@ class TileProjector:
             transform = homography
 
         if floor_mask is not None:
-            sx, sy = self._plane_shift(homography, floor_mask, self.PLANE_SPAN_PIXELS)
+            sx, sy = self._plane_shift(homography, floor_mask, canvas.shape[0])
             if sx or sy:
                 shift = np.array(
-                    [[1, 0, -sx], [0, 1, -sy], [0, 0, 1]],
-                    dtype=np.float64,
+                    [[1, 0, -sx], [0, 1, -sy], [0, 0, 1]], dtype=np.float64
                 )
                 transform = transform @ shift
 
@@ -182,26 +201,12 @@ class TileProjector:
             borderMode=cv2.BORDER_CONSTANT,
             borderValue=(0, 0, 0),
         )
-
-        source_coverage = np.full(canvas.shape[:2], 255, dtype=np.uint8)
-        warped_coverage = cv2.warpPerspective(
-            source_coverage,
-            transform,
-            (width, height),
-            flags=cv2.INTER_LINEAR,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=0,
-        )
-        self.last_projection_mask = (warped_coverage >= 200).astype(np.uint8)
         self.last_grout_mask = (warped_grout[:, :, 0] > 80).astype(np.uint8)
-
         if self.debug:
             cv2.imwrite("output/debug_tile.png", tile)
             cv2.imwrite("output/debug_canvas.png", canvas)
             cv2.imwrite("output/debug_grout_mask.png", self.last_grout_mask * 255)
-            cv2.imwrite("output/debug_projection_mask.png", self.last_projection_mask * 255)
             cv2.imwrite("output/debug_projection.png", warped)
-
         return warped
 
     def blend(
@@ -213,22 +218,16 @@ class TileProjector:
         occlusion_mask: np.ndarray | None = None,
     ) -> np.ndarray:
         """Blend the projection over the floor while preserving foreground objects."""
-        mask = self.feather.feather(floor_mask, radius=17).astype(np.float32)
-        if self.last_projection_mask is not None:
-            coverage = cv2.GaussianBlur(self.last_projection_mask.astype(np.float32), (0, 0), 1.2)
-            mask *= np.clip(coverage, 0.0, 1.0)
-
-        self.last_occlusion_diagnostics = OcclusionMask.leakage_diagnostics(mask, occlusion_mask)
+        mask = self.feather.feather(floor_mask, radius=17)
+        self.last_occlusion_diagnostics = OcclusionMask.leakage_diagnostics(
+            mask, occlusion_mask
+        )
         mask = OcclusionMask.apply(mask, occlusion_mask)[..., None]
-
         room = room.astype(np.float32)
         projection = projection.astype(np.float32)
         projection = projection * alpha + room * (1.0 - alpha)
-
         result = room * (1.0 - mask) + projection * mask
         result = np.clip(result, 0, 255)
-
         if self.debug:
             cv2.imwrite("output/debug_final.png", result.astype(np.uint8))
-
         return result.astype(np.uint8)

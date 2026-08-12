@@ -14,7 +14,7 @@ from app.renderer.tile_projector import TileProjector
 
 
 class TileRenderer:
-    """Composites a material into a scene using a surface-specific profile."""
+    """Composite a material into a scene using a surface-specific profile."""
 
     def __init__(self, debug: bool = False) -> None:
         self.projector = TileProjector(debug=debug)
@@ -34,6 +34,10 @@ class TileRenderer:
         pattern: str = "Straight",
         material_profile: str = "generic",
         material_intelligence: dict[str, object] | None = None,
+        smart_removal: bool = True,
+        furniture_shadow: bool = True,
+        enhance_lighting: bool = True,
+        visualization_mode: str = "Realistic",
     ) -> np.ndarray:
         if scene.image is None:
             raise RuntimeError("Scene image missing.")
@@ -43,6 +47,7 @@ class TileRenderer:
             raise RuntimeError("Homography missing.")
 
         render_mask = self._floor_render_mask(scene)
+        protected = scene.protected_object_mask if smart_removal else None
 
         projection = self.projector.project(
             tile_image=tile,
@@ -64,8 +69,9 @@ class TileRenderer:
             texture_scale_factor=float((material_intelligence or {}).get("texture_scale_factor", 1.0)),
         )
 
-        lighting = self.lighting.extract(scene.image, render_mask)
-        projection = self.lighting.apply(projection, lighting, render_mask)
+        if enhance_lighting and visualization_mode == "Realistic":
+            lighting = self.lighting.extract(scene.image, render_mask)
+            projection = self.lighting.apply(projection, lighting, render_mask)
 
         projection = self.matcher.match(
             room=scene.image,
@@ -73,28 +79,89 @@ class TileRenderer:
             floor_mask=render_mask,
         )
 
-        protected = scene.protected_object_mask
+        # Keep grout joints visually legible after material/lighting/color
+        # processing. The seam mask is generated from the same physical tile
+        # geometry used for projection, so it remains aligned in perspective.
+        grout_mask = self.projector.last_grout_mask
+        if grout_mask is not None and grout_width > 0:
+            gm = np.clip(grout_mask.astype(np.float32), 0.0, 1.0)[..., None]
+            grout_bgr = np.asarray(tuple(int(c) for c in grout_color), dtype=np.float32)
+            projection = projection.astype(np.float32) * (1.0 - gm * 0.42) + grout_bgr * (gm * 0.42)
+            projection = np.clip(projection, 0, 255).astype(np.uint8)
+
         if protected is not None:
             scene.metadata.setdefault("occlusion", {})["applied"] = True
             scene.metadata["occlusion"]["protected_pixels"] = int((protected > 0).sum())
+        else:
+            scene.metadata.setdefault("occlusion", {})["applied"] = False
 
         result = self.projector.blend(
             room=scene.image,
             projection=projection,
             floor_mask=render_mask,
-            alpha=alpha,
+            alpha=alpha if visualization_mode == "Realistic" else min(alpha, 0.98),
             occlusion_mask=protected,
         )
         if self.projector.last_occlusion_diagnostics is not None:
-            scene.metadata.setdefault("occlusion", {}).update(
-                self.projector.last_occlusion_diagnostics
-            )
+            scene.metadata.setdefault("occlusion", {}).update(self.projector.last_occlusion_diagnostics)
+
+        if visualization_mode == "Realistic":
+            original = scene.image.astype(np.float32)
+            rendered = result.astype(np.float32)
+            gray = cv2.cvtColor(scene.image, cv2.COLOR_BGR2GRAY).astype(np.float32)
+            local = gray - cv2.GaussianBlur(gray, (0, 0), 9)
+            rendered += local[..., None] * 0.035
+            result = np.clip(rendered, 0, 255).astype(np.uint8)
+            _ = original
 
         return result
 
     @staticmethod
     def _floor_render_mask(scene: SceneResult) -> np.ndarray:
-        """Mask covering the visible floor to tile."""
+        """Recover small AI-carving gaps at object/floor contact edges."""
         if scene.floor_mask is None:
             return np.zeros(scene.size[::-1], dtype=np.uint8)
-        return scene.floor_mask
+
+        mask = scene.floor_mask.copy()
+        protected = scene.protected_object_mask
+        depth = scene.depth_map
+        if protected is None or depth is None or not (protected > 0).any():
+            return mask
+
+        try:
+            normal = np.asarray(scene.floor_plane.normal, dtype=np.float32).reshape(-1)
+            distance = float(scene.floor_plane.distance)
+            if normal.size < 3 or abs(float(normal[2])) < 1e-6:
+                return mask
+
+            h, w = mask.shape
+            ys, xs = np.mgrid[0:h, 0:w]
+            residual = np.abs(
+                float(normal[0]) * xs.astype(np.float32)
+                + float(normal[1]) * ys.astype(np.float32)
+                + float(normal[2]) * depth.astype(np.float32)
+                + distance
+            )
+
+            existing = residual[mask > 0]
+            if existing.size < 500:
+                return mask
+
+            tolerance = float(np.percentile(existing, 97))
+            object_band = cv2.dilate(protected, np.ones((17, 17), np.uint8))
+            candidate = (object_band > 0) & (mask == 0) & (residual <= tolerance)
+
+            recovered = cv2.morphologyEx(
+                candidate.astype(np.uint8) * 255,
+                cv2.MORPH_CLOSE,
+                cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)),
+            )
+            mask = cv2.bitwise_or(mask, recovered)
+            mask = cv2.morphologyEx(
+                mask,
+                cv2.MORPH_CLOSE,
+                cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)),
+            )
+            return mask
+        except (TypeError, ValueError, AttributeError, IndexError):
+            return mask

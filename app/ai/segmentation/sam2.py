@@ -38,10 +38,7 @@ class SAM2Provider(Segmenter):
         if GlobalHydra.instance().is_initialized():
             GlobalHydra.instance().clear()
 
-        initialize_config_dir(
-            version_base=None,
-            config_dir=self.config_dir,
-        )
+        initialize_config_dir(version_base=None, config_dir=self.config_dir)
 
         from sam2.build_sam import build_sam2
         from sam2.sam2_image_predictor import SAM2ImagePredictor
@@ -54,14 +51,72 @@ class SAM2Provider(Segmenter):
         )
         self.predictor = SAM2ImagePredictor(self.model)
 
+    @staticmethod
+    def _floor_candidate_score(mask: np.ndarray, box: tuple[int, int, int, int]) -> float:
+        """Score a SAM2 floor candidate using perspective-room priors."""
+        binary = mask > 0
+        h, w = binary.shape
+        area = float(binary.mean())
+        if area <= 0.005:
+            return -1e9
+
+        x1, y1, x2, y2 = box
+        x1 = max(0, min(w - 1, x1))
+        x2 = max(x1 + 1, min(w, x2))
+        y1 = max(0, min(h - 1, y1))
+        y2 = max(y1 + 1, min(h, y2))
+
+        bottom_band = binary[max(0, h - max(8, h // 20) ) :]
+        bottom_touch = float(bottom_band.mean())
+        lower_support = float(binary[h // 2 :].mean())
+        box_mask = np.zeros_like(binary)
+        box_mask[y1:y2, x1:x2] = True
+        inside_ratio = float((binary & box_mask).sum()) / max(float(binary.sum()), 1.0)
+
+        ys, _ = np.where(binary)
+        centroid_y = float(ys.mean()) / max(h - 1, 1)
+        edge = max(2, w // 80)
+        side_touch = float(binary[:, :edge].mean() + binary[:, -edge:].mean())
+
+        return (
+            4.0 * bottom_touch
+            + 2.0 * lower_support
+            + 1.5 * inside_ratio
+            + centroid_y
+            - 1.5 * max(0.0, area - 0.80)
+            - 0.25 * side_touch
+        )
+
+    def _segment_floor(
+        self,
+        image: np.ndarray,
+        box: tuple[int, int, int, int],
+    ) -> np.ndarray:
+        """Use SAM2's multi-mask output and choose the floor-like hypothesis."""
+        masks, _, _ = self.predictor.predict(
+            box=np.asarray(box, dtype=np.float32)[None, :],
+            multimask_output=True,
+        )
+        candidates = [(m * 255).astype(np.uint8) for m in masks]
+        return max(candidates, key=lambda m: self._floor_candidate_score(m, box))
+
     def segment(
         self,
         image: np.ndarray,
         box: tuple[int, int, int, int] | None = None,
         points: np.ndarray | None = None,
     ) -> np.ndarray:
-        masks = self.segment_many(image, boxes=[box] if box is not None else None, points=points)
-        return masks[0]
+        rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        self.predictor.set_image(rgb)
+        if box is not None:
+            return self._segment_floor(image, box)
+
+        kwargs: dict = {"multimask_output": False}
+        if points is not None:
+            kwargs["point_coords"] = points.astype(np.float32)
+            kwargs["point_labels"] = np.ones(len(points), dtype=np.int32)
+        masks, _, _ = self.predictor.predict(**kwargs)
+        return (masks[0] * 255).astype(np.uint8)
 
     def segment_many(
         self,

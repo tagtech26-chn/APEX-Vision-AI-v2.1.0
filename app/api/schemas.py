@@ -21,6 +21,12 @@ class RenderRequest(BaseModel):
         default="generic",
         description="Surface-specific rendering profile, or auto for deterministic baseline classification.",
     )
+    smart_removal: bool = Field(default=True, description="Preserve detected foreground objects above the floor material.")
+    furniture_shadow: bool = Field(default=True, description="Retain furniture/object shading during floor compositing.")
+    enhance_lighting: bool = Field(default=True, description="Apply low-frequency room illumination to the projected material.")
+    surface: Literal["Floor", "Wall", "Ceiling"] = Field(default="Floor")
+    environment: Literal["Interior", "Exterior"] = Field(default="Interior")
+    visualization_mode: Literal["Realistic", "Material Only"] = Field(default="Realistic")
 
     @field_validator("grout_color")
     @classmethod

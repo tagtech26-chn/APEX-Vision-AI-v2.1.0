@@ -1,19 +1,6 @@
 <#
 .SYNOPSIS
     Starts the APEX Vision AI production server (single service: SPA + API).
-
-.DESCRIPTION
-    Loads models.env (heavy model paths, created by setup-windows.ps1 /
-    download-heavy-models.ps1) if present, then runs uvicorn with a single
-    worker. The AI provider defaults to 'auto' (heavy when the models load,
-    otherwise the OpenCV heuristic pipeline). Override with e.g.
-    $env:APEX_AI_PROVIDER = "heavy" or "light" before running.
-
-.PARAMETER Port
-    Port to bind. Default 8000.
-
-.PARAMETER HostAddr
-    Address to bind. Default 0.0.0.0 (all interfaces).
 #>
 param(
     [ValidateRange(1, 65535)][int]$Port = 8000,
@@ -36,14 +23,85 @@ if (Test-Path $envFile) {
 }
 
 if (-not $env:APEX_AI_PROVIDER) {
-    Write-Host "APEX_AI_PROVIDER unset - using 'auto' (heavy when models load, else light)." -ForegroundColor DarkGray
+    $env:APEX_AI_PROVIDER = "heavy"
+    Write-Host "APEX_AI_PROVIDER unset - using production Heavy AI." -ForegroundColor DarkGray
+}
+if (-not $env:APEX_AI_DEVICE) {
+    $env:APEX_AI_DEVICE = "auto"
+    Write-Host "APEX_AI_DEVICE unset - selecting CUDA when available, otherwise CPU." -ForegroundColor DarkGray
 }
 
-$dist = Join-Path $Root "frontend\dist"
-if (-not (Test-Path $dist)) {
-    Write-Warning "frontend\dist not found - the web UI will not be served. Run scripts\setup-windows.ps1 (or 'npm run build' in frontend/) first."
+if (-not $env:APEX_CACHE_SIGNING_KEY) {
+    $cacheKeyFile = Join-Path $Root ".apex-cache-signing-key"
+    if (Test-Path $cacheKeyFile) {
+        $env:APEX_CACHE_SIGNING_KEY = (Get-Content $cacheKeyFile -Raw).Trim()
+    }
+    else {
+        $bytes = New-Object byte[] 32
+        $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+        try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+        $env:APEX_CACHE_SIGNING_KEY = [Convert]::ToBase64String($bytes)
+        Set-Content -Path $cacheKeyFile -Value $env:APEX_CACHE_SIGNING_KEY -NoNewline
+    }
+    Write-Host "Scene analysis cache enabled with local signing key." -ForegroundColor DarkGray
+}
+
+$frontend = Join-Path $Root "frontend"
+$dist = Join-Path $frontend "dist"
+$distIndex = Join-Path $dist "index.html"
+$packageJson = Join-Path $frontend "package.json"
+$packageLock = Join-Path $frontend "package-lock.json"
+$nodeModules = Join-Path $frontend "node_modules"
+
+$needsBuild = -not (Test-Path $distIndex)
+if (-not $needsBuild) {
+    $bundleTime = (Get-Item $distIndex).LastWriteTimeUtc
+    $sourceFiles = Get-ChildItem -Path (Join-Path $frontend "src") -Recurse -File -Include *.ts,*.tsx,*.css,*.html -ErrorAction SilentlyContinue
+    $configPaths = @($packageJson, (Join-Path $frontend "vite.config.ts"), (Join-Path $frontend "tsconfig.json")) | Where-Object { Test-Path $_ }
+    $configFiles = $configPaths | ForEach-Object { Get-Item $_ }
+    $newestSource = @($sourceFiles + $configFiles) | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+    if ($newestSource -and $newestSource.LastWriteTimeUtc -gt $bundleTime) { $needsBuild = $true }
+}
+
+if ($needsBuild) {
+    $npmCommand = $null
+    $npmCmdPath = Join-Path $env:ProgramFiles "nodejs\npm.cmd"
+    if (Test-Path $npmCmdPath) {
+        $npmCommand = $npmCmdPath
+    }
+    else {
+        $npmCommandInfo = Get-Command npm.cmd -ErrorAction SilentlyContinue
+        if ($npmCommandInfo) { $npmCommand = $npmCommandInfo.Source }
+    }
+    if (-not $npmCommand) {
+        $npmCommandInfo = Get-Command npm -ErrorAction SilentlyContinue
+        if ($npmCommandInfo) { $npmCommand = $npmCommandInfo.Source }
+    }
+    if (-not $npmCommand) {
+        Write-Error "Node.js/npm is required to build the frontend. Install Node.js and ensure npm.cmd is available."
+        exit 1
+    }
+
+    Write-Host "Using npm: $npmCommand" -ForegroundColor DarkGray
+    Set-Location $frontend
+
+    if (-not (Test-Path $nodeModules)) {
+        if (-not (Test-Path $packageLock)) { Write-Error "frontend/package-lock.json is missing; cannot perform a reproducible frontend install." }
+        Write-Host "Installing frontend dependencies..." -ForegroundColor Yellow
+        & $npmCommand ci
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    }
+
+    Write-Host "Building latest frontend bundle..." -ForegroundColor Yellow
+    & $npmCommand run build
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    Set-Location $Root
+}
+else {
+    Write-Host "Frontend bundle is current." -ForegroundColor DarkGray
 }
 
 Write-Host "Starting APEX Vision AI on http://$HostAddr`:$Port" -ForegroundColor Green
+Write-Host "AI Provider: $env:APEX_AI_PROVIDER | Device: $env:APEX_AI_DEVICE" -ForegroundColor Cyan
 Set-Location $Root
 & $Python -m uvicorn app.main:app --host $HostAddr --port $Port --workers 1
