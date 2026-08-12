@@ -39,10 +39,16 @@ $TestPath = Join-Path -Path $RepoRoot -ChildPath "tests\test_v22_metric_floor.py
 if ($LASTEXITCODE -ne 0) { throw "Metric floor regression failed." }
 
 Write-Host "[4/4] V2.2 CPU provider construction smoke" -ForegroundColor Cyan
-$SmokePath = Join-Path -Path $env:TEMP -ChildPath "apex_v22_cpu_smoke.py"
+$SmokePath = Join-Path -Path $RepoRoot -ChildPath "apex_v22_cpu_smoke_temp.py"
 $SmokeCode = @'
 import os
+import sys
+
 os.environ["APEX_V22_DEVICE"] = "cpu"
+repo_root = os.path.dirname(os.path.abspath(__file__))
+if repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
+
 from app.ai.scene.analyzer import build_scene_analyzer
 
 a = build_scene_analyzer("v22")
@@ -57,8 +63,14 @@ print("CPU provider construction=OK")
 '@
 Set-Content -LiteralPath $SmokePath -Value $SmokeCode -Encoding utf8
 try {
-    & $Python $SmokePath
-    if ($LASTEXITCODE -ne 0) { throw "v2.2 CPU provider construction validation failed." }
+    Push-Location -LiteralPath $RepoRoot
+    try {
+        & $Python $SmokePath
+        if ($LASTEXITCODE -ne 0) { throw "v2.2 CPU provider construction validation failed." }
+    }
+    finally {
+        Pop-Location
+    }
 }
 finally {
     Remove-Item -LiteralPath $SmokePath -Force -ErrorAction SilentlyContinue
@@ -66,8 +78,14 @@ finally {
 
 if ($SmokeModels) {
     Write-Host "[MODEL SMOKE] Loading the CUDA v2.2 stack. This may download several GB and requires the approved checkpoints." -ForegroundColor Yellow
-    & $Python -c "from app.ai.scene.analyzer import build_scene_analyzer; a=build_scene_analyzer('v22'); print('detector=',a.detector.name); print('segmenter=',a.segmenter.name); print('depth=',a.depth.name)"
-    if ($LASTEXITCODE -ne 0) { throw "v2.2 model smoke failed." }
+    Push-Location -LiteralPath $RepoRoot
+    try {
+        & $Python -c "from app.ai.scene.analyzer import build_scene_analyzer; a=build_scene_analyzer('v22'); print('detector=',a.detector.name); print('segmenter=',a.segmenter.name); print('depth=',a.depth.name)"
+        if ($LASTEXITCODE -ne 0) { throw "v2.2 model smoke failed." }
+    }
+    finally {
+        Pop-Location
+    }
 }
 
 Write-Host "V2.2 validation PASSED." -ForegroundColor Green
