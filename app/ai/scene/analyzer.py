@@ -12,7 +12,7 @@ import numpy as np
 
 from app.ai.config import heavy_models_available, resolve_provider
 from app.ai.depth.base import DepthEstimator
-from app.ai.detection.base import Detection, ObjectDetector
+from app.ai.detection.base import ObjectDetector
 from app.ai.geometry.homography import HomographyEngine
 from app.ai.geometry.plane import PlaneEstimator, PlaneResult
 from app.ai.geometry.polygon import PolygonEngine
@@ -301,7 +301,7 @@ def _build_v22() -> SceneAnalyzer:
         from app.ai.detection.grounding_dino import GroundingDINOProvider
         from app.ai.segmentation.sam3 import SAM3Provider
 
-        detector = GroundingDINOProvider(device=resolved_device)
+        detector = GroundingDINOProvider()
         segmenter = SAM3Provider(prompt="floor", device=resolved_device)
         logger.info("[V2.2] CUDA geometry stack selected: GroundingDINO + SAM3 + %s.", depth.name)
     else:
