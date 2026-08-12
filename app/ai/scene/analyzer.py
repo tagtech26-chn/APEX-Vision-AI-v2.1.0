@@ -266,16 +266,30 @@ def _build_heavy() -> SceneAnalyzer:
 
 
 def _build_v22() -> SceneAnalyzer:
-    """Build the isolated v2.2 geometry stack; never falls back silently."""
+    """Build the isolated v2.2 geometry stack with a safe CPU fallback.
+
+    SAM3/GroundingDINO are imported only when CUDA is actually selected.
+    This prevents the CPU development path from importing Triton-dependent
+    SAM3 tracker code. Metric3D remains the v2.2 geometric depth provider on CPU.
+    """
     from app.ai.depth.metric3d import Metric3DProvider
     from app.ai.depth.unidepth import UniDepthV2Provider
-    from app.ai.detection.grounding_dino import GroundingDINOProvider
     from app.ai.scene.v22_analyzer import V22SceneAnalyzer
-    from app.ai.segmentation.sam3 import SAM3Provider
 
     depth_name = os.getenv("APEX_V22_DEPTH", "metric3d").strip().lower()
     device = os.getenv("APEX_V22_DEVICE", "auto").strip().lower()
-    resolved_device = None if device == "auto" else device
+
+    if device not in {"auto", "cpu", "cuda"}:
+        raise RuntimeError("APEX_V22_DEVICE must be 'auto', 'cpu', or 'cuda'.")
+
+    import torch
+
+    cuda_available = bool(torch.cuda.is_available())
+    if device == "cuda" and not cuda_available:
+        raise RuntimeError("APEX_V22_DEVICE=cuda but CUDA is not available.")
+    use_heavy = device == "cuda" or (device == "auto" and cuda_available)
+    resolved_device = "cuda" if use_heavy else "cpu"
+
     if depth_name == "metric3d":
         depth = Metric3DProvider(device=resolved_device)
     elif depth_name == "unidepth":
@@ -283,8 +297,22 @@ def _build_v22() -> SceneAnalyzer:
     else:
         raise RuntimeError("APEX_V22_DEPTH must be 'metric3d' or 'unidepth'.")
 
-    segmenter = SAM3Provider(prompt="floor", device=resolved_device)
-    return V22SceneAnalyzer(detector=GroundingDINOProvider(), segmenter=segmenter, depth=depth)
+    if use_heavy:
+        from app.ai.detection.grounding_dino import GroundingDINOProvider
+        from app.ai.segmentation.sam3 import SAM3Provider
+
+        detector = GroundingDINOProvider(device=resolved_device)
+        segmenter = SAM3Provider(prompt="floor", device=resolved_device)
+        logger.info("[V2.2] CUDA geometry stack selected: GroundingDINO + SAM3 + %s.", depth.name)
+    else:
+        from app.ai.detection.heuristic import HeuristicDetector
+        from app.ai.segmentation.heuristic import HeuristicSegmenter
+
+        detector = HeuristicDetector()
+        segmenter = HeuristicSegmenter()
+        logger.warning("[V2.2] CPU development mode: GroundingDINO/SAM3 disabled; using heuristic detector + heuristic segmentation. Depth provider remains %s on CPU.", depth.name)
+
+    return V22SceneAnalyzer(detector=detector, segmenter=segmenter, depth=depth)
 
 
 def _build_light() -> SceneAnalyzer:
