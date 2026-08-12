@@ -38,12 +38,26 @@ $TestPath = Join-Path -Path $RepoRoot -ChildPath "tests\test_v22_metric_floor.py
 & $Python -m pytest -q $TestPath
 if ($LASTEXITCODE -ne 0) { throw "Metric floor regression failed." }
 
-Write-Host "[4/4] Provider import smoke" -ForegroundColor Cyan
-& $Python -c "from app.ai.config import resolve_provider; from app.ai.geometry.metric_floor import MetricFloorEstimator; print('provider=', resolve_provider('v22')); print('MetricFloorEstimator=OK')"
-if ($LASTEXITCODE -ne 0) { throw "v2.2 provider import validation failed." }
+Write-Host "[4/4] V2.2 CPU provider construction smoke" -ForegroundColor Cyan
+$cpuSmoke = @'
+import os
+os.environ["APEX_V22_DEVICE"] = "cpu"
+from app.ai.scene.analyzer import build_scene_analyzer
+a = build_scene_analyzer("v22")
+print("provider=v22")
+print("detector=", a.detector.name)
+print("segmenter=", a.segmenter.name)
+print("depth=", a.depth.name)
+assert a.detector.name == "heuristic", a.detector.name
+assert a.segmenter.name == "heuristic", a.segmenter.name
+assert a.depth.name == "metric3d_v2", a.depth.name
+print("CPU provider construction=OK")
+'@
+& $Python -c $cpuSmoke
+if ($LASTEXITCODE -ne 0) { throw "v2.2 CPU provider construction validation failed." }
 
 if ($SmokeModels) {
-    Write-Host "[MODEL SMOKE] Loading Metric3D + SAM3. This may download several GB and requires the approved SAM3 checkpoint." -ForegroundColor Yellow
+    Write-Host "[MODEL SMOKE] Loading the CUDA v2.2 stack. This may download several GB and requires the approved checkpoints." -ForegroundColor Yellow
     & $Python -c "from app.ai.scene.analyzer import build_scene_analyzer; a=build_scene_analyzer('v22'); print('detector=',a.detector.name); print('segmenter=',a.segmenter.name); print('depth=',a.depth.name)"
     if ($LASTEXITCODE -ne 0) { throw "v2.2 model smoke failed." }
 }
